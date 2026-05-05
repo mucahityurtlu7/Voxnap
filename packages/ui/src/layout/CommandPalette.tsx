@@ -2,9 +2,17 @@
  * CommandPalette — ⌘K menu, Linear-flavoured.
  *
  * Lists pages, recent sessions and quick actions. Pure client-side filter,
- * no fuzzy lib needed.
+ * no fuzzy lib needed. Active row is kept in view via `scrollIntoView`,
+ * which matters when keyboard-only users blow past the visible window.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Mic,
@@ -24,6 +32,7 @@ import clsx from "clsx";
 import { useSessions } from "../hooks/useSessions.js";
 import { useTheme } from "../hooks/useTheme.js";
 import { Kbd } from "../components/ui/Kbd.js";
+import { Shortcut } from "../components/ui/Shortcut.js";
 import { Dialog } from "../components/ui/Dialog.js";
 
 interface PaletteItem {
@@ -56,6 +65,7 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   // Reset query when reopening; focus the input.
   useEffect(() => {
@@ -78,7 +88,7 @@ export function CommandPalette({
       { id: "p:sessions", group: "Pages", label: "Go to Sessions", icon: Library, run: navTo("/sessions") },
       { id: "p:summaries", group: "Pages", label: "Go to Summaries", icon: Sparkles, run: navTo("/summaries") },
       { id: "p:insights", group: "Pages", label: "Go to Insights", icon: BarChart3, run: navTo("/insights") },
-      { id: "p:settings", group: "Pages", label: "Go to Settings", icon: SettingsIcon, run: navTo("/settings") },
+      { id: "p:settings", group: "Pages", label: "Go to Settings", icon: SettingsIcon, run: navTo("/settings"), hint: "mod+," },
     ];
 
     const actions: PaletteItem[] = [];
@@ -92,7 +102,7 @@ export function CommandPalette({
           onToggleRecording();
           close();
         },
-        hint: recording ? "⌘ ." : "Space",
+        hint: "mod+.",
       });
     }
 
@@ -137,6 +147,15 @@ export function CommandPalette({
     return groups;
   }, [filtered]);
 
+  // Keep the active row visible after keyboard navigation.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-cmd-idx="${active}"]`,
+    );
+    el?.scrollIntoView({ block: "nearest" });
+  }, [active, open]);
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -144,6 +163,12 @@ export function CommandPalette({
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActive((a) => Math.max(0, a - 1));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setActive(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setActive(Math.max(0, filtered.length - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
       filtered[active]?.run();
@@ -169,16 +194,25 @@ export function CommandPalette({
             }}
             onKeyDown={onKeyDown}
             placeholder="Type a command or search…"
+            aria-label="Command palette search"
+            role="combobox"
+            aria-expanded
+            aria-controls="vx-cmd-list"
+            aria-activedescendant={filtered[active]?.id}
             className="flex-1 bg-transparent text-sm text-text outline-none placeholder:text-muted"
           />
           <Kbd>Esc</Kbd>
         </div>
 
-        <div className="max-h-[60vh] overflow-y-auto p-2">
+        <div
+          ref={listRef}
+          id="vx-cmd-list"
+          role="listbox"
+          aria-label="Commands"
+          className="max-h-[60vh] overflow-y-auto p-2"
+        >
           {grouped.length === 0 && (
-            <div className="px-3 py-8 text-center text-sm text-muted">
-              No matches.
-            </div>
+            <NoMatches query={query} />
           )}
           {grouped.map((g, gi) => (
             <div key={g.name} className="mb-2 last:mb-0">
@@ -192,20 +226,28 @@ export function CommandPalette({
                     <li key={item.id}>
                       <button
                         type="button"
+                        id={item.id}
+                        role="option"
+                        aria-selected={isActive}
+                        data-cmd-idx={idx}
                         onMouseEnter={() => setActive(idx)}
                         onClick={item.run}
                         className={clsx(
-                          "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm",
+                          "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm outline-none",
                           isActive
                             ? "bg-brand-gradient-soft text-text"
                             : "text-text-subtle hover:bg-surface-3 hover:text-text",
                         )}
                       >
-                        <Icon className="h-4 w-4 shrink-0 text-brand-500" />
+                        <Icon
+                          className={clsx(
+                            "h-4 w-4 shrink-0",
+                            isActive ? "text-brand-500" : "text-muted",
+                          )}
+                          aria-hidden
+                        />
                         <span className="flex-1 truncate text-left">{item.label}</span>
-                        {item.hint && (
-                          <span className="text-[11px] text-muted">{item.hint}</span>
-                        )}
+                        {renderHint(item.hint)}
                       </button>
                     </li>
                   );
@@ -215,20 +257,46 @@ export function CommandPalette({
           ))}
         </div>
 
-        <div className="flex items-center gap-3 border-t border-border bg-surface-2 px-4 py-2 text-[11px] text-muted">
-          <span className="inline-flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border bg-surface-2 px-4 py-2 text-[11px] text-muted">
+          <span className="inline-flex items-center gap-1.5">
             <Kbd>↑</Kbd>
-            <Kbd>↓</Kbd> Navigate
+            <Kbd>↓</Kbd>
+            <span>Navigate</span>
           </span>
-          <span className="inline-flex items-center gap-1">
-            <Kbd>↵</Kbd> Open
+          <span className="inline-flex items-center gap-1.5">
+            <Kbd>↵</Kbd>
+            <span>Open</span>
           </span>
-          <span className="ml-auto inline-flex items-center gap-1">
-            <Kbd>⌘</Kbd>
-            <Kbd>K</Kbd> Toggle
+          <span className="ml-auto inline-flex items-center gap-1.5">
+            <Shortcut keys="mod+k" variant="compact" />
+            <span>Toggle</span>
           </span>
         </div>
       </div>
     </Dialog>
+  );
+}
+
+function renderHint(hint?: string): ReactNode {
+  if (!hint) return null;
+  if (hint.includes("+")) {
+    return <Shortcut keys={hint} variant="compact" />;
+  }
+  return <span className="text-[11px] text-muted">{hint}</span>;
+}
+
+function NoMatches({ query }: { query: string }) {
+  return (
+    <div className="px-3 py-10 text-center">
+      <div className="mx-auto mb-2 flex h-9 w-9 items-center justify-center rounded-full bg-surface-3 text-muted">
+        <Library className="h-4 w-4" aria-hidden />
+      </div>
+      <div className="text-sm font-medium text-text">No matches</div>
+      <div className="mt-1 text-xs text-muted">
+        {query
+          ? <>No commands match <span className="text-text">“{query}”</span>.</>
+          : "Start typing to search commands."}
+      </div>
+    </div>
   );
 }

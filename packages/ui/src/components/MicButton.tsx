@@ -1,4 +1,4 @@
-import { Mic, MicOff, Loader2 } from "lucide-react";
+import { Mic, Square, Loader2 } from "lucide-react";
 import clsx from "clsx";
 import type { EngineState } from "@voxnap/core";
 
@@ -40,6 +40,7 @@ export function MicButton({
   const haloOpacity = isRunning ? 0.35 + Math.min(level, 1) * 0.25 : 0.18;
 
   const dim = size === "lg" ? "h-24 w-24" : "h-16 w-16";
+  const iconDim = size === "lg" ? "h-9 w-9" : "h-6 w-6";
 
   return (
     <button
@@ -47,10 +48,12 @@ export function MicButton({
       disabled={disabled}
       onClick={onClick}
       aria-label={isRunning ? "Stop recording" : "Start recording"}
+      aria-pressed={isRunning}
+      title={isRunning ? "Stop recording" : "Start recording"}
       className={clsx(
         "relative inline-flex items-center justify-center rounded-full",
         "outline-none transition-transform duration-150 ease-spring",
-        "focus-visible:ring-4 focus-visible:ring-brand-500/30",
+        "focus-visible:ring-4 focus-visible:ring-brand-500/40",
         disabled && "opacity-60 cursor-not-allowed",
         "hover:scale-[1.02] active:scale-[0.98]",
         dim,
@@ -77,13 +80,13 @@ export function MicButton({
         )}
       >
         {/* Inner ring */}
-        <span className="absolute inset-1 rounded-full border border-white/20" />
+        <span className="absolute inset-1 rounded-full border border-white/20" aria-hidden />
         {isLoading ? (
-          <Loader2 className={clsx(size === "lg" ? "h-9 w-9" : "h-6 w-6", "animate-spin")} />
+          <Loader2 className={clsx(iconDim, "animate-spin")} aria-hidden />
         ) : isRunning ? (
-          <MicOff className={size === "lg" ? "h-9 w-9" : "h-6 w-6"} />
+          <Square className={clsx(iconDim, "fill-white")} aria-hidden />
         ) : (
-          <Mic className={size === "lg" ? "h-9 w-9" : "h-6 w-6"} />
+          <Mic className={iconDim} aria-hidden />
         )}
       </span>
 

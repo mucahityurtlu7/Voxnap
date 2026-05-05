@@ -19,8 +19,6 @@ import {
   Copy,
   Eraser,
   Save,
-  Pause,
-  Play,
   Sparkles,
   CircleDot,
   Activity,
@@ -38,6 +36,7 @@ import { DeviceSelect } from "../components/DeviceSelect.js";
 import { LiveAiPanel } from "../components/LiveAiPanel.js";
 import { Button } from "../components/ui/Button.js";
 import { Badge } from "../components/ui/Badge.js";
+import { Shortcut } from "../components/ui/Shortcut.js";
 import { Tabs, TabsList, Tab, TabPanel } from "../components/ui/Tabs.js";
 import { useTranscription } from "../hooks/useTranscription.js";
 import { useSummarizer } from "../engine/SummarizerProvider.js";
@@ -248,6 +247,12 @@ interface HeroProps {
   onSave: () => void;
 }
 
+/**
+ * The hero card. We deliberately have a *single* primary CTA — the big
+ * MicButton — and reserve the action row strictly for transcript-level
+ * operations (copy / clear / save). A duplicate Start/Stop button next to
+ * the mic was confusing during testing, so it's gone.
+ */
 function RecordingHero({
   state,
   modelId,
@@ -255,7 +260,6 @@ function RecordingHero({
   deviceId,
   elapsedMs,
   onChangeDevice,
-  recordingDisabled,
   onToggleRecord,
   level,
   savedAt,
@@ -270,7 +274,7 @@ function RecordingHero({
   return (
     <section className="relative overflow-hidden rounded-2xl border border-border bg-surface bg-panel-glow">
       <div className="flex flex-col gap-5 p-5 md:flex-row md:items-center md:p-6">
-        {/* Mic */}
+        {/* Mic — sole primary CTA in this section */}
         <div className="flex shrink-0 items-center justify-center">
           <MicButton
             state={state}
@@ -284,11 +288,14 @@ function RecordingHero({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <Badge tone={running ? "danger" : "neutral"} dot>
-              {running ? "RECORDING" : statusLabel(state)}
+              {running ? "Recording" : statusLabel(state)}
             </Badge>
             {running && (
-              <span className="inline-flex items-center gap-1 font-mono text-xs text-text-subtle">
-                <Activity className="h-3 w-3 text-rose-500" />
+              <span
+                className="inline-flex items-center gap-1 font-mono text-xs tabular-nums text-text-subtle"
+                aria-label={`Elapsed ${elapsedLabel}`}
+              >
+                <Activity className="h-3 w-3 text-rose-500" aria-hidden />
                 {elapsedLabel}
               </span>
             )}
@@ -309,18 +316,21 @@ function RecordingHero({
               </>
             )}
           </h1>
-          <p className="mt-1 text-xs text-muted">
-            Press the mic, hit{" "}
-            <span className="vx-kbd">⌘</span>
-            <span className="vx-kbd">.</span>, or use the command palette to
-            start recording. Audio never leaves your device.
+          <p className="mt-1 inline-flex flex-wrap items-center gap-1.5 text-xs text-muted">
+            <span>Tap the mic, press</span>
+            <Shortcut keys="mod+." variant="compact" />
+            <span>or open</span>
+            <Shortcut keys="mod+k" variant="compact" />
+            <span>· audio never leaves your device.</span>
           </p>
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Badge tone="brand" icon={<Sparkles className="h-3 w-3" />}>
               {modelId}
             </Badge>
-            <Badge tone="neutral">{language === "auto" ? "Auto-detect" : language.toUpperCase()}</Badge>
+            <Badge tone="neutral">
+              {language === "auto" ? "Auto-detect" : language.toUpperCase()}
+            </Badge>
             <DeviceSelect
               value={deviceId}
               onChange={onChangeDevice}
@@ -331,7 +341,7 @@ function RecordingHero({
           </div>
         </div>
 
-        {/* Quick actions */}
+        {/* Transcript-level actions only — recording is owned by the mic */}
         <div className="flex w-full shrink-0 flex-wrap items-center justify-start gap-2 md:w-auto md:justify-end">
           <Button
             variant="secondary"
@@ -360,22 +370,6 @@ function RecordingHero({
           >
             Save session
           </Button>
-          <Button
-            variant={running ? "danger" : "primary"}
-            size="md"
-            leftIcon={
-              running ? (
-                <Pause className="h-3.5 w-3.5" />
-              ) : (
-                <Play className="h-3.5 w-3.5" />
-              )
-            }
-            disabled={recordingDisabled}
-            onClick={onToggleRecord}
-            className="sm:min-w-[120px]"
-          >
-            {running ? "Stop" : "Start"}
-          </Button>
         </div>
       </div>
     </section>
@@ -384,12 +378,14 @@ function RecordingHero({
 
 function statusLabel(state: string): string {
   return state === "loading-model"
-    ? "LOADING MODEL"
+    ? "Loading model"
     : state === "ready"
-      ? "READY"
+      ? "Ready"
       : state === "error"
-        ? "ERROR"
-        : "IDLE";
+        ? "Error"
+        : state === "paused"
+          ? "Paused"
+          : "Idle";
 }
 
 function formatElapsed(ms: number): string {

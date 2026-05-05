@@ -18,7 +18,7 @@ import type { Session, SpeakerColor } from "@voxnap/core";
 import { useSessions } from "../hooks/useSessions.js";
 import { SearchInput } from "../components/ui/SearchInput.js";
 import { Badge } from "../components/ui/Badge.js";
-import { Button } from "../components/ui/Button.js";
+import { LinkButton } from "../components/ui/LinkButton.js";
 import { Avatar } from "../components/ui/Avatar.js";
 import { EmptyState } from "../components/ui/EmptyState.js";
 import { Card } from "../components/ui/Card.js";
@@ -73,11 +73,13 @@ export function SessionsPage() {
             Everything you've recorded. Searchable, taggable, exportable.
           </p>
         </div>
-        <Button variant="primary" leftIcon={<Plus className="h-4 w-4" />}>
-          <Link to="/" className="text-inherit">
-            New session
-          </Link>
-        </Button>
+        <LinkButton
+          to="/"
+          variant="primary"
+          leftIcon={<Plus className="h-4 w-4" aria-hidden />}
+        >
+          New session
+        </LinkButton>
       </header>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -88,23 +90,36 @@ export function SessionsPage() {
           placeholder="Search by title, tag or content…"
           className="max-w-xl"
         />
-        <div className="flex flex-wrap items-center gap-1.5">
-          {FILTERS.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              onClick={() => setFilter(f.id)}
-              className={clsx(
-                "rounded-full border px-3 py-1 text-xs font-medium transition-colors",
-                filter === f.id
-                  ? "border-brand-500 bg-brand-gradient-soft text-text"
-                  : "border-border bg-surface-2 text-text-subtle hover:bg-surface-3 hover:text-text",
-              )}
-            >
-              {f.label}
-            </button>
-          ))}
-          <span className="ml-auto text-xs text-muted">
+        <div
+          role="tablist"
+          aria-label="Filter sessions"
+          className="flex flex-1 flex-wrap items-center gap-1.5"
+        >
+          {FILTERS.map((f) => {
+            const selected = filter === f.id;
+            return (
+              <button
+                key={f.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => setFilter(f.id)}
+                className={clsx(
+                  "rounded-full border px-3 py-1 text-xs font-medium outline-none transition-colors",
+                  "focus-visible:ring-2 focus-visible:ring-brand-500/40",
+                  selected
+                    ? "border-brand-500 bg-brand-gradient-soft text-text"
+                    : "border-border bg-surface-2 text-text-subtle hover:bg-surface-3 hover:text-text",
+                )}
+              >
+                {f.label}
+              </button>
+            );
+          })}
+          <span
+            className="ml-auto text-xs tabular-nums text-muted"
+            aria-live="polite"
+          >
             {filtered.length} of {sessions.length}
           </span>
         </div>
@@ -121,11 +136,9 @@ export function SessionsPage() {
           }
           action={
             sessions.length === 0 ? (
-              <Button variant="primary">
-                <Link to="/" className="text-inherit">
-                  Start recording
-                </Link>
-              </Button>
+              <LinkButton to="/" variant="primary">
+                Start recording
+              </LinkButton>
             ) : undefined
           }
         />
@@ -218,31 +231,47 @@ function SessionCard({ session, onStar, onDelete }: CardProps) {
         </div>
       </Link>
 
-      <div className="flex items-center justify-end gap-1 border-t border-border bg-surface-2 px-3 py-2 opacity-0 transition-opacity group-hover:opacity-100">
+      {/*
+        Action row: visible on touch (no hover), fades in on hover for
+        pointer devices. Keeps the card discoverable on mobile while
+        staying out of the way on desktop until needed.
+      */}
+      <div
+        className={clsx(
+          "flex items-center justify-end gap-1 border-t border-border bg-surface-2 px-3 py-2",
+          "transition-opacity",
+          "opacity-100 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100",
+        )}
+      >
         <button
           type="button"
-          aria-label={session.starred ? "Unstar" : "Star"}
+          aria-label={session.starred ? "Remove star" : "Star session"}
+          aria-pressed={session.starred}
           onClick={(e) => {
             e.preventDefault();
             onStar();
           }}
           className={clsx(
-            "flex h-7 w-7 items-center justify-center rounded-md hover:bg-surface-3",
+            "flex h-7 w-7 items-center justify-center rounded-md outline-none transition-colors",
+            "hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-brand-500/40",
             session.starred ? "text-amber-500" : "text-muted",
           )}
         >
-          <Star className={clsx("h-3.5 w-3.5", session.starred && "fill-amber-500")} />
+          <Star
+            className={clsx("h-3.5 w-3.5", session.starred && "fill-amber-500")}
+            aria-hidden
+          />
         </button>
         <button
           type="button"
-          aria-label="Delete"
+          aria-label="Delete session"
           onClick={(e) => {
             e.preventDefault();
-            if (confirm("Delete this session?")) onDelete();
+            if (confirm(`Delete "${session.title}"? This can't be undone.`)) onDelete();
           }}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-surface-3 hover:text-rose-500"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted outline-none transition-colors hover:bg-rose-500/10 hover:text-rose-500 focus-visible:ring-2 focus-visible:ring-rose-500/40"
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          <Trash2 className="h-3.5 w-3.5" aria-hidden />
         </button>
       </div>
     </Card>

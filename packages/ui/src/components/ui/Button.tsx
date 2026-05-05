@@ -11,14 +11,6 @@ export type ButtonVariant =
 
 export type ButtonSize = "sm" | "md" | "lg";
 
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: ButtonVariant;
-  size?: ButtonSize;
-  loading?: boolean;
-  leftIcon?: ReactNode;
-  rightIcon?: ReactNode;
-}
-
 const VARIANTS: Record<ButtonVariant, string> = {
   primary:
     "bg-brand-600 text-white hover:bg-brand-500 active:bg-brand-700 shadow-soft",
@@ -36,6 +28,37 @@ const SIZES: Record<ButtonSize, string> = {
   md: "h-9 px-3.5 text-sm gap-2 rounded-md",
   lg: "h-11 px-5 text-sm gap-2 rounded-lg",
 };
+
+const BASE =
+  "inline-flex select-none items-center justify-center font-medium transition-colors duration-150 outline-none " +
+  "focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-bg " +
+  "disabled:cursor-not-allowed disabled:opacity-50";
+
+/**
+ * Compose Voxnap's button classes without rendering any element.
+ *
+ * Useful when you need to make a non-button (e.g. `<Link>`) look like a
+ * button — see `LinkButton` and the `react-router` integrations in pages.
+ */
+export function buttonClasses({
+  variant = "secondary",
+  size = "md",
+  className,
+}: {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  className?: string;
+} = {}): string {
+  return clsx(BASE, VARIANTS[variant], SIZES[size], className);
+}
+
+export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  loading?: boolean;
+  leftIcon?: ReactNode;
+  rightIcon?: ReactNode;
+}
 
 /**
  * Voxnap's primary button. Tiny on purpose — no headless library.
@@ -61,15 +84,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       ref={ref}
       type={type}
       disabled={disabled || loading}
-      className={clsx(
-        "inline-flex select-none items-center justify-center font-medium",
-        "transition-colors duration-150 outline-none",
-        "focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
-        "disabled:cursor-not-allowed disabled:opacity-50",
-        VARIANTS[variant],
-        SIZES[size],
-        className,
-      )}
+      className={buttonClasses({ variant, size, className })}
       {...rest}
     >
       {loading ? (

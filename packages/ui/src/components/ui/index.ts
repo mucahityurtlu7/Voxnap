@@ -1,4 +1,5 @@
 export * from "./Button.js";
+export * from "./LinkButton.js";
 export * from "./Card.js";
 export * from "./Badge.js";
 export * from "./Tabs.js";
@@ -10,6 +11,7 @@ export * from "./Skeleton.js";
 export * from "./Tooltip.js";
 export * from "./Avatar.js";
 export * from "./Kbd.js";
+export * from "./Shortcut.js";
 export * from "./Dialog.js";
 export * from "./Toast.js";
 export * from "./Slider.js";

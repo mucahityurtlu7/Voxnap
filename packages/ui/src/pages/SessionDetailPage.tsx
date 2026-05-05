@@ -1,7 +1,7 @@
 /**
  * SessionDetailPage — full transcript + summary + action items + chapters + chat.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -25,6 +25,7 @@ import { useSession, useSessions } from "../hooks/useSessions.js";
 import { useSummarizer } from "../engine/SummarizerProvider.js";
 import { useToasts } from "../components/ui/Toast.js";
 import { Button } from "../components/ui/Button.js";
+import { LinkButton } from "../components/ui/LinkButton.js";
 import { Badge } from "../components/ui/Badge.js";
 import { Avatar } from "../components/ui/Avatar.js";
 import { Tabs, TabsList, Tab, TabPanel } from "../components/ui/Tabs.js";
@@ -46,13 +47,17 @@ export function SessionDetailPage() {
 
   if (!session) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
-        <p className="text-sm text-muted">Session not found.</p>
-        <Button variant="secondary">
-          <Link to="/sessions" className="text-inherit">
-            Back to sessions
-          </Link>
-        </Button>
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+        <p className="text-sm text-muted">
+          We couldn't find that session — it may have been deleted.
+        </p>
+        <LinkButton
+          to="/sessions"
+          variant="secondary"
+          leftIcon={<ArrowLeft className="h-3.5 w-3.5" aria-hidden />}
+        >
+          Back to sessions
+        </LinkButton>
       </div>
     );
   }
@@ -233,33 +238,63 @@ export function SessionDetailPage() {
   );
 }
 
+const EXPORT_KINDS = [
+  { id: "md", label: "Markdown", hint: ".md" },
+  { id: "txt", label: "Plain text", hint: ".txt" },
+  { id: "srt", label: "Subtitles", hint: ".srt" },
+  { id: "json", label: "Raw data", hint: ".json" },
+] as const;
+
 function ExportMenu({ onPick }: { onPick: (kind: "md" | "txt" | "srt" | "json") => void }) {
   const [open, setOpen] = useState(false);
+
+  // Esc to close — small QoL win that costs nothing.
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open]);
+
   return (
     <div className="relative">
       <Button
         variant="secondary"
         size="sm"
-        leftIcon={<Download className="h-3.5 w-3.5" />}
+        leftIcon={<Download className="h-3.5 w-3.5" aria-hidden />}
         onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
         Export
       </Button>
       {open && (
         <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} aria-hidden />
-          <div className="absolute right-0 z-40 mt-1 w-40 overflow-hidden rounded-lg border border-border bg-surface shadow-soft animate-fade-in">
-            {(["md", "txt", "srt", "json"] as const).map((k) => (
+          <div
+            className="fixed inset-0 z-30"
+            onClick={() => setOpen(false)}
+            aria-hidden
+          />
+          <div
+            role="menu"
+            aria-label="Export format"
+            className="absolute right-0 z-40 mt-1 w-48 overflow-hidden rounded-lg border border-border bg-surface shadow-soft animate-fade-in"
+          >
+            {EXPORT_KINDS.map((k) => (
               <button
-                key={k}
+                key={k.id}
                 type="button"
+                role="menuitem"
                 onClick={() => {
-                  onPick(k);
+                  onPick(k.id);
                   setOpen(false);
                 }}
-                className="flex w-full items-center justify-between px-3 py-2 text-xs text-text-subtle hover:bg-surface-3 hover:text-text"
+                className="flex w-full items-center justify-between px-3 py-2 text-xs text-text-subtle outline-none transition-colors hover:bg-surface-3 hover:text-text focus-visible:bg-surface-3 focus-visible:text-text"
               >
-                <span>Export as .{k}</span>
+                <span>{k.label}</span>
+                <span className="font-mono text-[10px] text-muted">{k.hint}</span>
               </button>
             ))}
           </div>
@@ -536,6 +571,14 @@ function ChatView({ session }: { session: Session }) {
     },
   ]);
   const [draft, setDraft] = useState("");
+  const scrollerRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to the latest message.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages]);
 
   const send = () => {
     const q = draft.trim();
@@ -547,7 +590,13 @@ function ChatView({ session }: { session: Session }) {
 
   return (
     <Card className="flex h-[60vh] min-h-[420px] flex-col overflow-hidden">
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div
+        ref={scrollerRef}
+        className="flex-1 space-y-3 overflow-y-auto p-4"
+        role="log"
+        aria-live="polite"
+        aria-label="Chat transcript"
+      >
         {messages.map((m, i) => (
           <div
             key={i}
@@ -557,13 +606,16 @@ function ChatView({ session }: { session: Session }) {
             )}
           >
             {m.role === "ai" && (
-              <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white">
+              <span
+                className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white"
+                aria-hidden
+              >
                 <Sparkles className="h-3 w-3" />
               </span>
             )}
             <div
               className={clsx(
-                "max-w-[80%] rounded-2xl px-3 py-2 text-sm",
+                "max-w-[80%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed",
                 m.role === "user"
                   ? "bg-brand-500 text-white"
                   : "bg-surface-2 text-text",
@@ -574,28 +626,36 @@ function ChatView({ session }: { session: Session }) {
           </div>
         ))}
       </div>
-      <div className="flex items-center gap-2 border-t border-border bg-surface-2 p-3">
+      <div className="flex items-end gap-2 border-t border-border bg-surface-2 p-3">
+        <label htmlFor="vx-chat-input" className="sr-only">
+          Ask this transcript a question
+        </label>
         <input
+          id="vx-chat-input"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
           placeholder="Ask this transcript anything…"
           className="flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-brand-500/60 focus:ring-2 focus:ring-brand-500/20"
         />
         <Button
           variant="primary"
           size="md"
-          leftIcon={<Send className="h-3.5 w-3.5" />}
+          leftIcon={<Send className="h-3.5 w-3.5" aria-hidden />}
           onClick={send}
           disabled={!draft.trim()}
         >
           Ask
         </Button>
       </div>
-      <p className="border-t border-border bg-surface-2 px-3 py-2 text-[11px] text-muted">
-        <MessageCircle className="inline h-3 w-3 mr-1" />
-        Mock answers — wire up a real provider in Settings · AI to enable
-        grounded chat.
+      <p className="flex items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-2 text-[11px] text-muted">
+        <MessageCircle className="h-3 w-3" aria-hidden />
+        Mock answers — wire a real provider in Settings · AI to enable grounded chat.
       </p>
     </Card>
   );

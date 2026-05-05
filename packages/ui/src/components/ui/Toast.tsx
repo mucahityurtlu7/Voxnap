@@ -83,25 +83,39 @@ const TONE_BORDER = {
   danger: "border-l-rose-500",
 };
 
+const TONE_ICON_COLOR = {
+  info: "text-brand-500",
+  success: "text-emerald-500",
+  warning: "text-amber-500",
+  danger: "text-rose-500",
+};
+
 export function ToastViewport() {
   const ctx = useContext(Ctx);
   // Always-mounted is fine; if no provider, render nothing.
   if (!ctx) return null;
   const { toasts, dismiss } = ctx;
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-full max-w-sm flex-col gap-2">
+    <div
+      role="region"
+      aria-label="Notifications"
+      aria-live="polite"
+      aria-atomic="false"
+      className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-full max-w-sm flex-col gap-2 safe-bottom"
+    >
       {toasts.map((t) => {
-        const Icon = TONE_ICON[t.tone ?? "info"];
+        const tone = t.tone ?? "info";
+        const Icon = TONE_ICON[tone];
         return (
           <div
             key={t.id}
-            role="status"
+            role={tone === "danger" || tone === "warning" ? "alert" : "status"}
             className={clsx(
               "pointer-events-auto flex items-start gap-3 rounded-xl border border-l-4 border-border bg-surface p-3 pr-2 shadow-soft animate-fade-in",
-              TONE_BORDER[t.tone ?? "info"],
+              TONE_BORDER[tone],
             )}
           >
-            <Icon className="mt-0.5 h-4 w-4 text-brand-500" />
+            <Icon className={clsx("mt-0.5 h-4 w-4", TONE_ICON_COLOR[tone])} />
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold text-text">{t.title}</div>
               {t.description && (
@@ -111,8 +125,8 @@ export function ToastViewport() {
             <button
               type="button"
               onClick={() => dismiss(t.id)}
-              aria-label="Dismiss"
-              className="flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-surface-3 hover:text-text"
+              aria-label="Dismiss notification"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted outline-none transition-colors hover:bg-surface-3 hover:text-text focus-visible:ring-2 focus-visible:ring-brand-500/40"
             >
               <X className="h-3.5 w-3.5" />
             </button>
