@@ -26,6 +26,5 @@ export default defineConfig({
     sourcemap: true,
   },
   optimizeDeps: {
-    include: ["@voxnap/core", "@voxnap/ui"],
   },
 });
