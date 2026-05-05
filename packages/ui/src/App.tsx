@@ -8,7 +8,11 @@
  */
 import { useState, useEffect } from "react";
 import { Route, Routes, BrowserRouter, HashRouter } from "react-router-dom";
-import { DEFAULT_MODEL, useTranscriptionStore, type WhisperModelId } from "@voxnap/core";
+import {
+  DEFAULT_MODEL,
+  useTranscriptionStore,
+  type WhisperModelId,
+} from "@voxnap/core";
 
 import { AppShell } from "./layout/AppShell.js";
 import { LiveTranscribePage } from "./pages/LiveTranscribePage.js";
@@ -19,6 +23,8 @@ import { SummariesPage } from "./pages/SummariesPage.js";
 import { InsightsPage } from "./pages/InsightsPage.js";
 import { ensureThemeApplied } from "./hooks/useTheme.js";
 import { useEngine } from "./engine/EngineProvider.js";
+import { useOnboarding } from "./hooks/useOnboarding.js";
+import { OnboardingPage } from "./onboarding/OnboardingPage.js";
 
 export interface AppProps {
   /**
@@ -43,10 +49,32 @@ export function App({ router = "browser" }: AppProps) {
 }
 
 function Shell() {
-  const [modelId, setModelId] = useState<WhisperModelId>(DEFAULT_MODEL);
-  const [language, setLanguage] = useState<string>("auto");
+  const onboarding = useOnboarding();
+
+  const [modelId, setModelId] = useState<WhisperModelId>(
+    onboarding.choices.modelId ?? DEFAULT_MODEL,
+  );
+  const [language, setLanguage] = useState<string>(
+    onboarding.choices.language ?? "auto",
+  );
   const engine = useEngine();
   const engineState = useTranscriptionStore((s) => s.engineState);
+
+  // Once the user finishes onboarding, hydrate the live config with their
+  // picks so the first recording uses the model + language they chose.
+  useEffect(() => {
+    if (onboarding.completed) {
+      setModelId(onboarding.choices.modelId);
+      setLanguage(onboarding.choices.language);
+    }
+  }, [onboarding.completed, onboarding.choices.modelId, onboarding.choices.language]);
+
+  // Until the user has finished the welcome wizard, render it instead of
+  // the regular AppShell. This keeps the first-run experience focused and
+  // avoids confusing them with sidebars + empty pages.
+  if (!onboarding.completed) {
+    return <OnboardingPage />;
+  }
 
   const onToggleRecording = () => {
     if (engineState === "running") void engine.stop();

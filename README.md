@@ -37,9 +37,18 @@ pnpm --filter @voxnap/mobile ios:dev
 pnpm --filter @voxnap/mobile android:dev
 ```
 
-The first launch with no model file will run a **stub** transcription so you
-can verify the UI ↔ engine wiring is alive. Drop the `ggml-*.bin` into
-`./models` (or run `pnpm fetch:model`) to enable real transcription.
+What you should see:
+
+- **Desktop / mobile:** if a `ggml-*.bin` model is present (in `./models` or
+  `<app-data>/models`) live transcription starts immediately; the waveform
+  meter animates and segments stream in as you speak. If no model is found,
+  the UI surfaces a `model-not-found` error toast and the audio meter still
+  works so you can confirm capture wiring.
+- **Web:** the first run downloads the matching ONNX Whisper checkpoint
+  from the HuggingFace Hub via [transformers.js](https://github.com/xenova/transformers.js)
+  (~40 MB for `base`, cached in IndexedDB after that) and then transcribes
+  entirely on-device. No `ggml-*.bin` is required for the browser build.
+
 
 ## Repo layout
 

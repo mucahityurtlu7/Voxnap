@@ -23,7 +23,7 @@
     "typecheck": "pnpm -r --parallel typecheck",
     "test": "pnpm -r --parallel test",
     "fmt": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css}\" --ignore-path .gitignore",
-    "fetch:model": "node scripts/fetch-model.mjs",
+"fetch:model": "node scripts/fetch-model.mjs base.q5_1",
     "clean": "pnpm -r exec rimraf dist build node_modules .turbo",
     "graph:install": "node scripts/install-graphify.mjs",
     "graph": "graphify extract .",

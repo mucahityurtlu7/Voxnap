@@ -2,15 +2,17 @@
  * Web entry point.
  *
  * Picks an ASR engine based on `VITE_ENGINE`:
- *   - "mock"  → MockEngine (default in dev — no model needed)
- *   - "wasm"  → WasmEngine + whisper worker + microphone capture
+ *   - "wasm"  → WasmEngine + transformers.js whisper worker (default)
+ *   - "mock"  → MockEngine (no model needed; useful for offline UI work)
  *
- * Set VITE_ENGINE=wasm in `.env.local` (or your shell) once you've placed
- * a whisper model under `public/whisper/ggml-<modelId>.bin`. Use:
+ * The WasmEngine path runs whisper entirely on-device via transformers.js;
+ * the model is fetched from the HuggingFace Hub on first run and cached
+ * in IndexedDB. No backend, no cloud — same privacy posture as the desktop
+ * build.
  *
- *   pnpm fetch:model base.q5_1
- *
- * which writes to `apps/web/public/whisper/ggml-base.q5_1.bin`.
+ * Set `VITE_MODEL=tiny`, `VITE_MODEL=base`, `VITE_MODEL=small`, etc. to
+ * pick a checkpoint size. Defaults to `base.q5_1` (which maps to the ONNX
+ * `Xenova/whisper-base` repo inside the worker).
  *
  * Summariser + session store are mock-first; both can be swapped without
  * touching any UI code.
@@ -20,6 +22,7 @@ import "./index.css";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import {
+  DEFAULT_MODEL,
   MicCapture,
   MockEngine,
   MockSummarizer,
@@ -41,10 +44,13 @@ import {
 import workletUrl from "./workers/pcm-capture.worklet.ts?worker&url";
 
 function createEngine(): ITranscriptionEngine {
-  const which = (import.meta.env.VITE_ENGINE ?? "mock") as "mock" | "wasm";
+  const which = (import.meta.env.VITE_ENGINE ?? "wasm") as "mock" | "wasm";
 
   if (which === "wasm") {
-    const modelId = (import.meta.env.VITE_MODEL ?? "base.q5_1") as WhisperModelId;
+    const modelId = (import.meta.env.VITE_MODEL ?? DEFAULT_MODEL) as WhisperModelId;
+    // The transformers.js worker doesn't actually need this URL — it
+    // resolves the model itself from the HuggingFace Hub — but we keep
+    // the field populated for future swap-in of a local ggml-* file.
     const modelUrl = `/whisper/ggml-${modelId}.bin`;
 
     const engine = new WasmEngine({
@@ -53,19 +59,15 @@ function createEngine(): ITranscriptionEngine {
         new Worker(new URL("./workers/whisper.worker.ts", import.meta.url), { type: "module" }),
     });
 
-    // The web build owns microphone capture and pushes PCM frames to the engine.
+    // The web build owns microphone capture and pushes PCM frames to
+    // the engine. Lifecycle is driven entirely by the engine state.
     let capture: MicCapture | null = null;
     engine.on("state-change", async (s) => {
       if (s === "running" && !capture) {
         capture = new MicCapture({
           workletUrl,
           onFrame: (pcm) => engine.pushAudio?.(pcm),
-          onLevel: (rms, peak) =>
-            // Mirror level back through the engine's emitter so UI gets it.
-            (engine as unknown as { emit: (e: string, p: unknown) => void }).emit?.(
-              "audio-level",
-              { rms, peak, at: Date.now() },
-            ),
+          onLevel: (rms, peak) => engine.reportLevel(rms, peak),
         });
         try {
           await capture.start();

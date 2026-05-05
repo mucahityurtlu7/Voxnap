@@ -25,6 +25,8 @@ export type { ShortcutBinding } from "./hooks/useShortcuts.js";
 export { useSessions, useSession } from "./hooks/useSessions.js";
 export { useLiveAi } from "./hooks/useLiveAi.js";
 export type { LiveAiState, UseLiveAiOptions } from "./hooks/useLiveAi.js";
+export { useOnboarding } from "./hooks/useOnboarding.js";
+export type { UseOnboardingApi } from "./hooks/useOnboarding.js";
 
 // ---------- domain components --------------------------------------------
 export { MicButton } from "./components/MicButton.js";
@@ -51,6 +53,9 @@ export { SessionDetailPage } from "./pages/SessionDetailPage.js";
 export { SummariesPage } from "./pages/SummariesPage.js";
 export { InsightsPage } from "./pages/InsightsPage.js";
 
+// ---------- onboarding wizard --------------------------------------------
+export * from "./onboarding/index.js";
+
 // ---------- re-exports for app convenience -------------------------------
 export type {
   EngineState,
@@ -68,4 +73,7 @@ export type {
   Sentiment,
   SummaryLength,
   AiProvider,
+  OnboardingStep,
+  OnboardingTheme,
+  OnboardingChoices,
 } from "@voxnap/core";

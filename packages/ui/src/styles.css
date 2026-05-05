@@ -149,4 +149,30 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0; }
   }
+
+  /* Confetti pieces on the onboarding "Done" step.
+     Each piece flies from (0,0) out to (--vx-confetti-x, --vx-confetti-y)
+     and fades. Animation runs once and then stays at the end keyframe. */
+  .vx-confetti-piece {
+    top: 0;
+    left: 0;
+    opacity: 0;
+    animation: vxConfettiBurst 1100ms cubic-bezier(.22,1.4,.36,1) forwards;
+  }
+  @keyframes vxConfettiBurst {
+    0% {
+      transform: translate(-50%, -50%) rotate(0deg) scale(0.6);
+      opacity: 0;
+    }
+    20% {
+      opacity: 1;
+    }
+    100% {
+      transform:
+        translate(calc(-50% + var(--vx-confetti-x, 0)),
+                  calc(-50% + var(--vx-confetti-y, 0)))
+        rotate(540deg) scale(1);
+      opacity: 0;
+    }
+  }
 }

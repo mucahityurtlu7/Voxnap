@@ -22,12 +22,13 @@
 //!
 //!   commands  : voxnap_init, voxnap_start, voxnap_stop, voxnap_dispose,
 //!               voxnap_list_devices
-//!   events    : voxnap://state, voxnap://transcript, voxnap://error
+//!   events    : voxnap://state-change, voxnap://segment,
+//!               voxnap://audio-level, voxnap://error
 //!
-//! NOTE: this module currently ships an end-to-end *scaffold*. The cpal
-//! capture loop is wired up and will stream PCM to the whisper task; the
-//! whisper task itself emits stub segments until you drop a real model file
-//! into `<resourceDir>/models/ggml-<id>.bin` (see README).
+//! Drop a real model file into `<resourceDir>/models/ggml-<id>.bin` (or run
+//! `pnpm fetch:model`) to enable transcription; without one, the pipeline
+//! still streams audio-level events so the UI can confirm wiring.
+
 
 mod audio;
 mod commands;
@@ -37,9 +38,16 @@ mod whisper;
 
 /// Entry point shared by both the desktop binary (`main.rs`) and the
 /// mobile crate (`apps/mobile/src-tauri`).
+///
+/// We let `tauri_plugin_log` own the global logger; installing
+/// `tracing_subscriber` on top of it would panic at startup with
+/// "attempted to set a logger after the logging system was already
+/// initialized". `tracing::info!` calls still flow through the plugin's
+/// log shim, so we don't lose anything.
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::default().build())
+
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init())
@@ -64,11 +72,5 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,voxnap=debug")),
-        )
-        .try_init();
-}
+
+

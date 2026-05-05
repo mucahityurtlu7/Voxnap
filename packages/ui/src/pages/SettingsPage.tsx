@@ -12,6 +12,7 @@ import {
   Keyboard,
   Info,
   KeyRound,
+  RefreshCw,
 } from "lucide-react";
 import clsx from "clsx";
 import {
@@ -28,9 +29,11 @@ import { Toggle } from "../components/ui/Toggle.js";
 import { Slider } from "../components/ui/Slider.js";
 import { Select } from "../components/ui/Select.js";
 import { Badge } from "../components/ui/Badge.js";
+import { Button } from "../components/ui/Button.js";
 import { Kbd } from "../components/ui/Kbd.js";
 import { useTheme, type ThemeMode } from "../hooks/useTheme.js";
 import { formatShortcut } from "../hooks/useShortcuts.js";
+import { useOnboarding } from "../hooks/useOnboarding.js";
 
 const LANGUAGES: { code: string; label: string }[] = [
   { code: "auto", label: "Auto-detect" },
@@ -455,6 +458,14 @@ function ShortcutsSection() {
 }
 
 function AboutSection() {
+  const onboarding = useOnboarding();
+
+  const handleRerunSetup = () => {
+    // `reset()` flips `completed` back to false and rewinds to step 0.
+    // The next render of <App /> will swap to <OnboardingPage />.
+    onboarding.reset();
+  };
+
   return (
     <Section title="About" description="Voxnap is privacy-first by design.">
       <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
@@ -469,6 +480,24 @@ function AboutSection() {
         default — your recordings never leave your machine unless you
         explicitly pick a cloud AI provider above.
       </p>
+
+      <div className="mt-1 flex items-center justify-between gap-3 rounded-xl border border-border bg-surface-2 p-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-text">First-run setup</div>
+          <div className="mt-0.5 text-xs text-muted">
+            Replay the welcome wizard to reconfigure your microphone, model
+            and AI provider from scratch.
+          </div>
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
+          onClick={handleRerunSetup}
+        >
+          Run setup again
+        </Button>
+      </div>
     </Section>
   );
 }

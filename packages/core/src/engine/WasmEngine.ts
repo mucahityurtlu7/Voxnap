@@ -74,14 +74,49 @@ export class WasmEngine extends EngineEmitter implements ITranscriptionEngine {
 
   async init(config: EngineConfig): Promise<void> {
     if (this.worker) return; // idempotent
+    // eslint-disable-next-line no-console
+    console.info("[voxnap.wasm] init", config);
     this.setState("loading-model");
 
-    this.worker = this.opts.workerFactory();
-    this.worker.onmessage = (e: MessageEvent<WasmWorkerOutbound>) => this.onWorkerMessage(e.data);
-    this.worker.onerror = (e) => {
+    try {
+      this.worker = this.opts.workerFactory();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[voxnap.wasm] failed to spawn worker:", err);
       this.emit("error", {
         code: "engine-internal",
-        message: `Worker error: ${e.message}`,
+        message: `Failed to spawn worker: ${(err as Error)?.message ?? err}`,
+        cause: err,
+      });
+      this.setState("error");
+      throw err;
+    }
+    this.worker.onmessage = (e: MessageEvent<WasmWorkerOutbound>) => this.onWorkerMessage(e.data);
+    this.worker.onerror = (e) => {
+      // ErrorEvent.message is often empty for cross-origin / module workers,
+      // so log every available field for debugging.
+      // eslint-disable-next-line no-console
+      console.error("[voxnap.wasm] worker.onerror", {
+        message: e.message,
+        filename: e.filename,
+        lineno: e.lineno,
+        colno: e.colno,
+        error: e.error,
+      });
+      this.emit("error", {
+        code: "engine-internal",
+        message: e.message
+          ? `Worker error: ${e.message}`
+          : `Worker error at ${e.filename ?? "<unknown>"}:${e.lineno ?? "?"}`,
+        cause: e.error ?? e,
+      });
+    };
+    this.worker.onmessageerror = (e) => {
+      // eslint-disable-next-line no-console
+      console.error("[voxnap.wasm] worker.onmessageerror", e);
+      this.emit("error", {
+        code: "engine-internal",
+        message: "Worker message could not be deserialised",
         cause: e,
       });
     };
@@ -97,9 +132,17 @@ export class WasmEngine extends EngineEmitter implements ITranscriptionEngine {
       modelUrl: this.opts.modelUrl,
     } satisfies WasmWorkerInbound);
 
-    await this.readyPromise;
+    try {
+      await this.readyPromise;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[voxnap.wasm] init failed waiting for worker ready:", err);
+      this.setState("error");
+      throw err;
+    }
     this.setState("ready");
   }
+
 
   async listDevices(): Promise<AudioDevice[]> {
     // Browser audio device enumeration belongs to the host (the web app),
@@ -134,6 +177,17 @@ export class WasmEngine extends EngineEmitter implements ITranscriptionEngine {
     this.worker.postMessage({ type: "audio", pcm } satisfies WasmWorkerInbound, [pcm.buffer]);
   }
 
+  /**
+   * Inject an audio-level reading from the host (e.g. computed inside the
+   * AudioWorklet's main-thread receiver). Web hosts capture audio outside
+   * the engine, so they need a way to feed RMS/peak back into the same
+   * event stream the UI subscribes to.
+   */
+  reportLevel(rms: number, peak: number): void {
+    this.emit("audio-level", { rms, peak, at: Date.now() });
+  }
+
+
   async dispose(): Promise<void> {
     this.worker?.postMessage({ type: "dispose" } satisfies WasmWorkerInbound);
     this.worker?.terminate();
@@ -149,6 +203,8 @@ export class WasmEngine extends EngineEmitter implements ITranscriptionEngine {
   private onWorkerMessage(msg: WasmWorkerOutbound): void {
     switch (msg.type) {
       case "ready":
+        // eslint-disable-next-line no-console
+        console.info("[voxnap.wasm] worker ready");
         this.readyResolve?.();
         this.readyResolve = null;
         this.readyReject = null;
@@ -157,6 +213,8 @@ export class WasmEngine extends EngineEmitter implements ITranscriptionEngine {
         this.emit("segment", { ...msg.segment, id: msg.segment.id || nanoid(8) });
         return;
       case "error":
+        // eslint-disable-next-line no-console
+        console.error(`[voxnap.wasm] worker error: ${msg.message}`);
         this.emit("error", { code: "engine-internal", message: msg.message });
         this.readyReject?.(new Error(msg.message));
         this.readyReject = null;
@@ -164,4 +222,5 @@ export class WasmEngine extends EngineEmitter implements ITranscriptionEngine {
         return;
     }
   }
+
 }

@@ -49,8 +49,19 @@ export function useTranscription(): UseTranscriptionApi {
   // Wire engine events → store, exactly once per engine instance.
   useEffect(() => {
     const offSeg = engine.on("segment", upsert);
-    const offState = engine.on("state-change", setEngineState);
-    const offErr = engine.on("error", setError);
+    const offState = engine.on("state-change", (s) => {
+      // eslint-disable-next-line no-console
+      console.info(`[voxnap] engine state → ${s}`);
+      setEngineState(s);
+    });
+    const offErr = engine.on("error", (err) => {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[voxnap] engine error (${err.code}): ${err.message}`,
+        err.cause ?? err,
+      );
+      setError(err);
+    });
     const offLvl = engine.on("audio-level", setLevel);
     return () => {
       offSeg();
@@ -59,6 +70,7 @@ export function useTranscription(): UseTranscriptionApi {
       offLvl();
     };
   }, [engine, upsert, setEngineState, setError, setLevel]);
+
 
   const init = useCallback(
     (config: EngineConfig) => engine.init(config),

@@ -25,9 +25,11 @@ import {
 } from "lucide-react";
 import {
   DEFAULT_MODEL,
+  useTranscriptionStore,
   type Session,
   type WhisperModelId,
 } from "@voxnap/core";
+
 
 import { MicButton } from "../components/MicButton.js";
 import { TranscriptView } from "../components/TranscriptView.js";
@@ -57,6 +59,8 @@ export function LiveTranscribePage({
   const summarizer = useSummarizer();
   const { upsert } = useSessions();
   const { push: toast } = useToasts();
+  const lastError = useTranscriptionStore((s) => s.lastError);
+  const clearError = useTranscriptionStore((s) => s.setError);
 
   const [deviceId, setDeviceId] = useState<string | undefined>(undefined);
   const [initialised, setInitialised] = useState(false);
@@ -66,17 +70,47 @@ export function LiveTranscribePage({
   const startedAtRef = useRef<number | null>(null);
   const [, forceTick] = useState(0);
 
+  // Surface engine errors as toasts so users get something more useful
+  // than the cryptic "Engine error" pill in the sidebar.
+  useEffect(() => {
+    if (!lastError) return;
+    toast({
+      title: errorTitleFor(lastError.code),
+      description: lastError.message,
+      tone: "danger",
+      duration: 6000,
+    });
+    // Clear so re-running into the same error toasts again.
+    const id = setTimeout(() => clearError(null), 0);
+    return () => clearTimeout(id);
+  }, [lastError, toast, clearError]);
+
   // Lazily initialise the engine on first mount.
   useEffect(() => {
     if (initialised) return;
     let cancelled = false;
-    void t.init({ modelId, language }).then(() => {
-      if (!cancelled) setInitialised(true);
-    });
+    t.init({ modelId, language })
+      .then(() => {
+        if (!cancelled) setInitialised(true);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // eslint-disable-next-line no-console
+        console.error("[voxnap] engine init failed:", err);
+        toast({
+          title: "Couldn't load the engine",
+          description:
+            (err as Error)?.message ??
+            "See the developer console for details.",
+          tone: "danger",
+          duration: 6000,
+        });
+      });
     return () => {
       cancelled = true;
     };
-  }, [t, modelId, language, initialised]);
+  }, [t, modelId, language, initialised, toast]);
+
 
   // Track recording start for the elapsed timer.
   useEffect(() => {
@@ -376,7 +410,25 @@ function RecordingHero({
   );
 }
 
+function errorTitleFor(code: string): string {
+  switch (code) {
+    case "model-not-found":
+      return "Model not found";
+    case "model-load-failed":
+      return "Couldn't load the model";
+    case "audio-device-failed":
+      return "Microphone unavailable";
+    case "permission-denied":
+      return "Microphone permission denied";
+    case "not-supported":
+      return "Not supported on this device";
+    default:
+      return "Engine error";
+  }
+}
+
 function statusLabel(state: string): string {
+
   return state === "loading-model"
     ? "Loading model"
     : state === "ready"

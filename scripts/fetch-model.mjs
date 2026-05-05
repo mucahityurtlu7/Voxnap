@@ -67,8 +67,12 @@ if (!KNOWN_MODELS.includes(modelId)) {
   );
 }
 
+// Local filename keeps dots (e.g. ggml-base.q5_1.bin) — what whisper-rs expects.
 const fileName = `ggml-${modelId}.bin`;
-const url = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${fileName}?download=true`;
+// Hugging Face repository uses dashes instead of dots for quantized variants
+// (e.g. ggml-base-q5_1.bin).  Convert dots → dashes only for the remote path.
+const hfFileName = `ggml-${modelId.replace(/\./g, "-")}.bin`;
+const url = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${hfFileName}?download=true`;
 const outPath = path.join(outDir, fileName);
 
 fs.mkdirSync(outDir, { recursive: true });
