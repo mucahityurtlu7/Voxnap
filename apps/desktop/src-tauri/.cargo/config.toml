@@ -1,0 +1,9 @@
+# Build environment configuration for Windows development.
+# Sets the env vars that whisper-rs-sys requires so `pnpm dev:desktop`
+# works without manually calling vcvars64.bat beforehand.
+
+[env]
+# whisper-rs-sys: skip re-running bindgen (uses the patched pre-built bindings).
+WHISPER_DONT_GENERATE_BINDINGS = "1"
+# libclang path needed by bindgen (even when skipping, avoids fallback errors).
+LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"

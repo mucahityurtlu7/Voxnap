@@ -1,0 +1,9 @@
+@import "@voxnap/ui/styles.css";
+
+/* Mobile niceties: prevent rubber-band scroll on iOS, hide tap highlight. */
+html,
+body {
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}

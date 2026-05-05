@@ -1,0 +1,10 @@
+{
+  "$schema": "https://aka.ms/vscode-mcp-config.schema.json",
+  "servers": {
+    "graphify-voxnap": {
+      "type": "stdio",
+      "command": "graphify",
+      "args": [".", "--mcp"]
+    }
+  }
+}

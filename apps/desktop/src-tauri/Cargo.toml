@@ -1,0 +1,65 @@
+[package]
+name = "voxnap-desktop"
+version = "0.1.0"
+description = "Voxnap desktop — Tauri 2 shell with native whisper.cpp transcription."
+authors = ["Voxnap"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77"
+
+# The entry point is `src/main.rs` for the desktop binary, and `src/lib.rs`
+# is also exposed as a library so the mobile crate can re-use the pipeline.
+[lib]
+name = "voxnap_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.0.4", features = [] }
+tauri-plugin-dialog = "2.0.1"
+tauri-plugin-fs = "2.0.1"
+tauri-plugin-log = "2.0.0"
+tauri-plugin-os = "2.0.0"
+tauri-plugin-shell = "2.0.1"
+tauri-plugin-store = "2.1.0"
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Audio capture (cross-platform: WASAPI / CoreAudio / ALSA / AAudio).
+cpal = "0.15"
+
+# Lock-free SPSC ring buffer for audio handoff.
+ringbuf = "0.4"
+
+# whisper.cpp Rust bindings. Enable hardware acceleration features as needed
+# per platform via Cargo features (see `[features]` below).
+whisper-rs = { version = "0.13", default-features = false }
+
+[features]
+# Compile-time switches that map to whisper.cpp's CMake flags. Pick one
+# acceleration backend at build time:
+#
+#   cargo build --features metal      # Apple Silicon
+#   cargo build --features cuda       # NVIDIA
+#   cargo build --features openblas   # CPU (faster matmul)
+#
+# The default feature set keeps things portable: pure CPU whisper.cpp
+# (slow but works everywhere — fine for the initial scaffold).
+default = []
+metal = ["whisper-rs/metal"]
+cuda = ["whisper-rs/cuda"]
+coreml = ["whisper-rs/coreml"]
+openblas = ["whisper-rs/openblas"]
+
+# Tauri's mobile target needs special handling; this profile is also used
+# from `apps/mobile/src-tauri`.
+[target."cfg(any(target_os = \"android\", target_os = \"ios\"))".dependencies]
+tauri = { version = "2.0.4", features = [] }

@@ -1,0 +1,37 @@
+{
+  "name": "@voxnap/ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voxnap shared React UI — pages, components, and hooks consumed by every app shell.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles.css": "./src/styles.css",
+    "./tailwind.preset.cjs": "./tailwind.preset.cjs"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "echo \"(ui) lint placeholder\"",
+    "test": "echo \"(ui) test placeholder\"",
+    "build": "tsc -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "dependencies": {
+    "@voxnap/core": "workspace:*",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.451.0",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.5.4"
+  }
+}

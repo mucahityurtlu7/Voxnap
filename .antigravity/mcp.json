@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "graphify-voxnap": {
+      "type": "stdio",
+      "command": "graphify",
+      "args": [".", "--mcp"]
+    }
+  }
+}

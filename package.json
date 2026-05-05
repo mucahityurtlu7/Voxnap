@@ -1,0 +1,43 @@
+{
+  "name": "voxnap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voxnap — cross-platform live transcription powered by whisper.cpp (Windows / macOS / Linux / Android / iOS / Web)",
+  "license": "MIT",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=18.18.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @voxnap/web dev",
+    "dev:desktop": "pnpm --filter @voxnap/desktop tauri dev",
+    "dev:mobile:android": "pnpm --filter @voxnap/mobile tauri android dev",
+    "dev:mobile:ios": "pnpm --filter @voxnap/mobile tauri ios dev",
+    "build:web": "pnpm --filter @voxnap/web build",
+    "build:desktop": "pnpm --filter @voxnap/desktop tauri build",
+    "build:mobile:android": "pnpm --filter @voxnap/mobile tauri android build",
+    "build:mobile:ios": "pnpm --filter @voxnap/mobile tauri ios build",
+    "build:packages": "pnpm --filter \"./packages/**\" build",
+    "lint": "pnpm -r --parallel lint",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test": "pnpm -r --parallel test",
+    "fmt": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css}\" --ignore-path .gitignore",
+    "fetch:model": "node scripts/fetch-model.mjs",
+    "clean": "pnpm -r exec rimraf dist build node_modules .turbo",
+    "graph:install": "node scripts/install-graphify.mjs",
+    "graph": "graphify .",
+    "graph:update": "graphify . --update",
+    "graph:watch": "graphify . --watch",
+    "graph:wiki": "graphify . --wiki",
+    "graph:mcp": "graphify . --mcp",
+    "graph:hook:install": "graphify hook install",
+    "graph:hook:uninstall": "graphify hook uninstall"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "prettier": "^3.3.3",
+    "rimraf": "^5.0.10",
+    "typescript": "^5.5.4"
+  }
+}
