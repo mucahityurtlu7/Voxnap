@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "graphify-voxnap": {
-      "command": "graphify",
-      "args": [".", "--mcp"]
+      "command": "python",
+      "args": ["-m", "graphify.serve", "graphify-out/graph.json"]
     }
   }
 }

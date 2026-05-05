@@ -89,7 +89,14 @@ clients is enough — no per-machine setup beyond `pnpm graph:install`.
 All configs invoke the same command:
 
 ```json
-{ "command": "graphify", "args": [".", "--mcp"] }
+{
+  "mcpServers": {
+    "graphify-voxnap": {
+      "command": "python",
+      "args": ["-m", "graphify.serve", "graphify-out/graph.json"]
+    }
+  }
+}
 ```
 
 > **Why a separate `.mcp.json` at the root?**

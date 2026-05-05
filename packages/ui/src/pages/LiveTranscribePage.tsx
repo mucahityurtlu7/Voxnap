@@ -269,9 +269,9 @@ function RecordingHero({
 
   return (
     <section className="relative overflow-hidden rounded-2xl border border-border bg-surface bg-panel-glow">
-      <div className="grid grid-cols-1 gap-4 p-5 md:grid-cols-[auto_1fr_auto] md:items-center md:p-6">
+      <div className="flex flex-col gap-5 p-5 md:flex-row md:items-center md:p-6">
         {/* Mic */}
-        <div className="flex items-center justify-center">
+        <div className="flex shrink-0 items-center justify-center">
           <MicButton
             state={state}
             onStart={onToggleRecord}
@@ -281,7 +281,7 @@ function RecordingHero({
         </div>
 
         {/* Status + chips */}
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <Badge tone={running ? "danger" : "neutral"} dot>
               {running ? "RECORDING" : statusLabel(state)}
@@ -332,7 +332,7 @@ function RecordingHero({
         </div>
 
         {/* Quick actions */}
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+        <div className="flex w-full shrink-0 flex-wrap items-center justify-start gap-2 md:w-auto md:justify-end">
           <Button
             variant="secondary"
             size="sm"
