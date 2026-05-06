@@ -28,6 +28,8 @@ import {
   useOnboardingStore,
   useTranscriptionStore,
   type Session,
+  type Speaker,
+  type SpeakerColor,
   type WhisperModelId,
 } from "@voxnap/core";
 
@@ -225,7 +227,7 @@ export function LiveTranscribePage({
       modelId,
       tags: [],
       starred: false,
-      speakers: [],
+      speakers: deriveSpeakers(t.finals),
       segments: t.finals,
       summary: ai.summary ?? undefined,
       actionItems: ai.actionItems,
@@ -529,4 +531,23 @@ function formatRelative(ts: number): string {
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
   return `${h}h ago`;
+}
+
+const SPEAKER_COLOR_PALETTE: SpeakerColor[] = [
+  "violet", "sky", "emerald", "amber", "rose", "cyan", "fuchsia",
+];
+
+function deriveSpeakers(segments: { speakerId?: string }[]): Speaker[] {
+  const seen = new Map<string, Speaker>();
+  let colorIdx = 0;
+  for (const seg of segments) {
+    if (seg.speakerId && !seen.has(seg.speakerId)) {
+      seen.set(seg.speakerId, {
+        id: seg.speakerId,
+        label: seg.speakerId === "you" ? "You" : `Speaker ${seen.size + 1}`,
+        color: SPEAKER_COLOR_PALETTE[colorIdx++ % SPEAKER_COLOR_PALETTE.length]!,
+      });
+    }
+  }
+  return Array.from(seen.values());
 }

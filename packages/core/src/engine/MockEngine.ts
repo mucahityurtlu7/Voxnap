@@ -14,12 +14,17 @@ import { nanoid } from "nanoid";
 import type { AudioDevice, EngineConfig, EngineState } from "../types.js";
 import { EngineEmitter, type ITranscriptionEngine } from "./ITranscriptionEngine.js";
 
-const SCRIPT: string[] = [
-  "Voxnap is a cross-platform live transcription app.",
-  "It runs on Windows, macOS, Linux, Android, iOS and the web.",
-  "On native targets it uses whisper.cpp through Rust.",
-  "On the web it runs whisper as WebAssembly inside a worker.",
-  "The UI is shared across all platforms.",
+const SCRIPT: { text: string; speakerId: string }[] = [
+  { text: "Voxnap is a cross-platform live transcription app.", speakerId: "you" },
+  { text: "It runs on Windows, macOS, Linux, Android, iOS and the web.", speakerId: "alex" },
+  { text: "On native targets it uses whisper.cpp through Rust.", speakerId: "you" },
+  { text: "On the web it runs whisper as WebAssembly inside a worker.", speakerId: "alex" },
+  { text: "The UI is shared across all platforms.", speakerId: "you" },
+];
+
+export const MOCK_SPEAKERS = [
+  { id: "you", label: "You", color: "violet" as const },
+  { id: "alex", label: "Alex", color: "sky" as const },
 ];
 
 export class MockEngine extends EngineEmitter implements ITranscriptionEngine {
@@ -29,6 +34,7 @@ export class MockEngine extends EngineEmitter implements ITranscriptionEngine {
   private scriptIndex = 0;
   private currentSegmentId: string | null = null;
   private currentTyped = "";
+  private currentSpeakerId = "";
 
   get state(): EngineState {
     return this._state;
@@ -91,22 +97,16 @@ export class MockEngine extends EngineEmitter implements ITranscriptionEngine {
       at: Date.now(),
     });
 
-    const phrase = SCRIPT[this.scriptIndex];
-    if (!phrase) {
-      // Loop the script for long sessions.
-      this.scriptIndex = 0;
-      this.currentSegmentId = null;
-      this.currentTyped = "";
-      return;
-    }
+    const phrase = SCRIPT[this.scriptIndex % SCRIPT.length]!;
 
     if (!this.currentSegmentId) {
       this.currentSegmentId = nanoid(8);
       this.currentTyped = "";
+      this.currentSpeakerId = phrase.speakerId;
     }
 
-    if (this.currentTyped.length < phrase.length) {
-      this.currentTyped = phrase.slice(0, this.currentTyped.length + 2);
+    if (this.currentTyped.length < phrase.text.length) {
+      this.currentTyped = phrase.text.slice(0, this.currentTyped.length + 2);
       this.emitSegment(this.currentTyped, false);
     } else {
       this.emitSegment(this.currentTyped, true);
@@ -127,6 +127,7 @@ export class MockEngine extends EngineEmitter implements ITranscriptionEngine {
       isFinal,
       confidence: 0.92,
       language: "en",
+      speakerId: this.currentSpeakerId,
     });
   }
 }
