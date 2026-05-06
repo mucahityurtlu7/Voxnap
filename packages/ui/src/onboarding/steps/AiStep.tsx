@@ -45,8 +45,8 @@ export function AiStep({
   const info = AI_PROVIDERS[provider];
 
   return (
-    <div className="flex flex-col gap-5">
-      <div role="radiogroup" aria-label="AI provider" className="grid gap-2">
+    <div className="flex flex-col gap-3">
+      <div role="radiogroup" aria-label="AI provider" className="grid gap-1.5">
         {Object.values(AI_PROVIDERS).map((p) => {
           const selected = provider === p.id;
           return (
@@ -57,7 +57,7 @@ export function AiStep({
               aria-checked={selected}
               onClick={() => onProviderChange(p.id)}
               className={clsx(
-                "flex items-start gap-3 rounded-xl border p-3 text-left outline-none transition-all duration-150",
+                "flex items-center gap-2.5 rounded-lg border px-2.5 py-1.5 text-left outline-none transition-all duration-150",
                 "focus-visible:ring-2 focus-visible:ring-brand-500/40",
                 selected
                   ? "border-brand-500 bg-brand-gradient-soft shadow-glow"
@@ -66,22 +66,22 @@ export function AiStep({
             >
               <div
                 className={clsx(
-                  "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
                   selected
                     ? "bg-brand-500 text-white"
                     : "bg-surface-3 text-muted",
                 )}
               >
                 {selected ? (
-                  <CheckCircle2 className="h-4 w-4" />
+                  <CheckCircle2 className="h-3.5 w-3.5" />
                 ) : p.local ? (
-                  <Lock className="h-4 w-4" />
+                  <Lock className="h-3.5 w-3.5" />
                 ) : (
-                  <Cloud className="h-4 w-4" />
+                  <Cloud className="h-3.5 w-3.5" />
                 )}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <span className="text-sm font-medium text-text">
                     {p.label}
                   </span>
@@ -90,11 +90,11 @@ export function AiStep({
                   </Badge>
                   {p.needsApiKey && (
                     <Badge tone="brand" size="sm">
-                      Needs API key
+                      API key
                     </Badge>
                   )}
                 </div>
-                <p className="mt-0.5 text-xs text-muted">
+                <p className="text-xs text-muted">
                   {DESCRIPTIONS[p.id]}
                 </p>
               </div>
@@ -114,7 +114,7 @@ export function AiStep({
           <p className="mt-0.5 text-xs text-muted">
             Stored locally only. Voxnap never proxies it through a server.
           </p>
-          <div className="relative mt-2">
+          <div className="relative mt-1.5">
             <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
             <input
               id="vx-onboarding-api-key"
@@ -136,7 +136,7 @@ export function AiStep({
           How verbose the AI should be when wrapping up a session.
         </p>
         <Select
-          className="mt-2"
+          className="mt-1.5"
           value={summaryLength}
           onChange={(e) =>
             onSummaryLengthChange(e.currentTarget.value as SummaryLength)

@@ -103,6 +103,12 @@ struct AudioLevelEvent {
 ///   2. `cfg.model_dir` if provided
 ///   3. `<app-data>/models`
 ///   4. `<resource-dir>/models` (bundled)
+///   5. Dev-time fallbacks: walk up from the executable and the current
+///      working directory looking for a `models/<file>` (this is what
+///      `tauri dev` needs because the workspace `models/` folder is *not*
+///      copied into `target/debug/` automatically — the
+///      `tauri.conf.json` `bundle.resources` mapping only fires for
+///      production bundles).
 pub fn resolve_model_path(app: &AppHandle, cfg: &WhisperConfig) -> Result<PathBuf> {
     if let Some(p) = &cfg.model_path {
         let pb = PathBuf::from(p);
@@ -123,6 +129,31 @@ pub fn resolve_model_path(app: &AppHandle, cfg: &WhisperConfig) -> Result<PathBu
     }
     if let Ok(p) = app.path().resource_dir() {
         candidates.push(p.join("models").join(&file_name));
+    }
+
+    // Dev fallbacks — walk up from the executable's directory and the
+    // current working directory and accept the first `models/<file>` we
+    // find. Capped at 8 hops so we never escape the repo.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    for root in roots {
+        let mut cur: Option<&std::path::Path> = Some(root.as_path());
+        for _ in 0..8 {
+            let Some(dir) = cur else { break };
+            candidates.push(dir.join("models").join(&file_name));
+            cur = dir.parent();
+        }
+    }
+
+    for c in &candidates {
+        tracing::debug!("model candidate: {}", c.display());
     }
 
     candidates

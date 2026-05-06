@@ -51,7 +51,7 @@ export function ModelStep({ value, onChange }: ModelStepProps) {
   const models = Object.values(WHISPER_MODELS);
 
   return (
-    <div role="radiogroup" aria-label="Whisper model" className="flex flex-col gap-2">
+    <div role="radiogroup" aria-label="Whisper model" className="flex flex-col gap-1.5">
       {models.map((m) => {
         const selected = value === m.id;
         const hint = HINTS[m.id];
@@ -64,7 +64,7 @@ export function ModelStep({ value, onChange }: ModelStepProps) {
             aria-checked={selected}
             onClick={() => onChange(m.id)}
             className={clsx(
-              "flex items-start gap-3 rounded-xl border p-3 text-left outline-none transition-all duration-200",
+              "flex items-center gap-2.5 rounded-lg border px-2.5 py-1.5 text-left outline-none transition-all duration-200",
               "focus-visible:ring-2 focus-visible:ring-brand-500/40",
               selected
                 ? "border-brand-500 bg-brand-gradient-soft shadow-glow"
@@ -73,21 +73,21 @@ export function ModelStep({ value, onChange }: ModelStepProps) {
           >
             <div
               className={clsx(
-                "mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
+                "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
                 selected
                   ? "bg-brand-500 text-white"
                   : "bg-surface-3 text-muted",
               )}
             >
               {selected ? (
-                <CheckCircle2 className="h-4 w-4" />
+                <CheckCircle2 className="h-3.5 w-3.5" />
               ) : (
-                <Cpu className="h-4 w-4" />
+                <Cpu className="h-3.5 w-3.5" />
               )}
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-sm font-medium text-text">{m.label}</span>
                 <span className="text-[11px] font-mono text-muted">
                   ~{m.approxSizeMb} MB
@@ -102,11 +102,11 @@ export function ModelStep({ value, onChange }: ModelStepProps) {
                   </Badge>
                 )}
                 <Badge tone={m.englishOnly ? "amber" : "sky"} size="sm">
-                  {m.englishOnly ? "English-only" : "Multilingual"}
+                  {m.englishOnly ? "EN-only" : "Multi"}
                 </Badge>
               </div>
 
-              <div className="mt-1.5 flex items-center gap-3 text-[11px] text-muted">
+              <div className="flex items-center gap-3 text-[11px] text-muted">
                 <span className="inline-flex items-center gap-1">
                   <Gauge className="h-3 w-3" />
                   {SPEED_LABEL[hint.speed]}
@@ -118,10 +118,8 @@ export function ModelStep({ value, onChange }: ModelStepProps) {
         );
       })}
 
-      <p className="mt-1 rounded-xl border border-border bg-surface-2 px-3 py-2 text-[11px] text-text-subtle">
-        Models are downloaded on first use into <code>./models</code> and
-        loaded directly by whisper.cpp. You can change this any time from
-        Settings → Model.
+      <p className="mt-0.5 rounded-lg border border-border bg-surface-2 px-2.5 py-1.5 text-[11px] text-text-subtle">
+        Downloaded on first use into <code>./models</code>. Change any time from Settings → Model.
       </p>
     </div>
   );

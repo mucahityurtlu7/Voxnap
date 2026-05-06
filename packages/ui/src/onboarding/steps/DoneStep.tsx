@@ -102,14 +102,14 @@ export function DoneStep({
   ];
 
   return (
-    <div className="relative flex flex-col gap-6">
+    <div className="relative flex flex-col gap-3">
       <Confetti />
 
       <div className="relative flex flex-col items-center text-center">
-        <div className="flex h-16 w-16 items-center justify-center rounded-full bg-brand-gradient shadow-glow">
-          <CheckCircle2 className="h-8 w-8 text-white" />
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-brand-gradient shadow-glow">
+          <CheckCircle2 className="h-6 w-6 text-white" />
         </div>
-        <p className="mt-4 max-w-sm text-sm text-text-subtle">
+        <p className="mt-2 max-w-sm text-sm text-text-subtle">
           Voxnap is configured the way you like it. Here's a quick recap —
           you can change any of these any time from{" "}
           <span className="font-medium text-text">Settings</span>.
@@ -122,7 +122,7 @@ export function DoneStep({
           return (
             <li
               key={it.label}
-              className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm"
+              className="flex items-center justify-between gap-3 px-3 py-1.5 text-sm"
             >
               <span className="flex items-center gap-2 text-text-subtle">
                 <Icon className="h-3.5 w-3.5 text-muted" />
@@ -137,7 +137,7 @@ export function DoneStep({
       <div className="flex flex-col items-center gap-2">
         <Button
           variant="primary"
-          size="lg"
+          size="md"
           rightIcon={<ArrowRight className="h-4 w-4" />}
           onClick={onFinish}
           className="w-full sm:w-auto"

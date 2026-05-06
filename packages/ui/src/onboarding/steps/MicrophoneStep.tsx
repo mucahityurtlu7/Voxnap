@@ -118,7 +118,7 @@ export function MicrophoneStep({
   const isStarting = test.kind === "starting";
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-3">
       {/* Device picker ------------------------------------------------- */}
       <div>
         <label
@@ -161,8 +161,8 @@ export function MicrophoneStep({
       </div>
 
       {/* Live waveform ------------------------------------------------- */}
-      <div className="rounded-xl border border-border bg-surface-2 p-4">
-        <div className="mb-3 flex items-center justify-between">
+      <div className="rounded-xl border border-border bg-surface-2 p-3">
+        <div className="mb-2 flex items-center justify-between">
           <div>
             <div className="text-sm font-medium text-text">Live preview</div>
             <p className="mt-0.5 text-xs text-muted">
@@ -178,7 +178,7 @@ export function MicrophoneStep({
 
         <WaveformBar level={level} idle={!isRunning} />
 
-        <div className="mt-3 flex items-center justify-between gap-3">
+        <div className="mt-2 flex items-center justify-between gap-3">
           <div className="text-[11px] font-mono text-muted">
             level {(level * 100).toFixed(0).padStart(2, "0")}% · peak{" "}
             {(peakRef.current * 100).toFixed(0).padStart(2, "0")}%
@@ -206,7 +206,7 @@ export function MicrophoneStep({
         </div>
 
         {test.kind === "error" && (
-          <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/5 p-2.5 text-xs text-rose-500">
+          <div className="mt-2 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/5 p-2.5 text-xs text-rose-500">
             <MicOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <div>
               <div className="font-medium">Microphone unavailable</div>

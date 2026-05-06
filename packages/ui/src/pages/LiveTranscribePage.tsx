@@ -239,8 +239,8 @@ export function LiveTranscribePage({
             </Tabs>
           </div>
 
-          <div className="hidden min-h-0 flex-1 lg:block">
-            <TranscriptView finals={t.finals} interim={t.interim} />
+          <div className="hidden min-h-0 flex-1 lg:flex lg:flex-col">
+            <TranscriptView finals={t.finals} interim={t.interim} className="flex-1" />
           </div>
 
           <WaveformBar level={t.level} idle={t.engineState !== "running"} />
@@ -307,7 +307,15 @@ function RecordingHero({
 
   return (
     <section className="relative overflow-hidden rounded-2xl border border-border bg-surface bg-panel-glow">
-      <div className="flex flex-col gap-5 p-5 md:flex-row md:items-center md:p-6">
+      {/*
+       * Hero stays stacked until we have real horizontal room. We can't switch
+       * to flex-row at `md` because the page itself uses a 2-col grid at `lg`
+       * (1fr | 360px), so the left column is still narrow at md/lg. Going to
+       * row earlier squeezes the middle "Ready when you are" copy down to a
+       * single word per line. xl gives the title and chip row enough breathing
+       * space.
+       */}
+      <div className="flex flex-col gap-5 p-5 md:p-6 xl:flex-row xl:items-center">
         {/* Mic — sole primary CTA in this section */}
         <div className="flex shrink-0 items-center justify-center">
           <MicButton
@@ -350,7 +358,7 @@ function RecordingHero({
               </>
             )}
           </h1>
-          <p className="mt-1 inline-flex flex-wrap items-center gap-1.5 text-xs text-muted">
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
             <span>Tap the mic, press</span>
             <Shortcut keys="mod+." variant="compact" />
             <span>or open</span>
@@ -376,7 +384,7 @@ function RecordingHero({
         </div>
 
         {/* Transcript-level actions only — recording is owned by the mic */}
-        <div className="flex w-full shrink-0 flex-wrap items-center justify-start gap-2 md:w-auto md:justify-end">
+        <div className="flex w-full shrink-0 flex-wrap items-center justify-start gap-2 xl:w-auto xl:justify-end">
           <Button
             variant="secondary"
             size="sm"

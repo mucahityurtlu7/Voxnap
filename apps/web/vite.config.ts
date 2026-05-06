@@ -38,10 +38,11 @@ export default defineConfig({
     sourcemap: true,
   },
   optimizeDeps: {
-    // Force pre-bundling of workspace deps so HMR works smoothly.
-    include: ["@voxnap/core", "@voxnap/ui"],
-    // Don't pre-bundle transformers.js — it has its own runtime loader
-    // for the ONNX/WASM artefacts and bundling them confuses Vite.
+    // @voxnap/* packages point to raw TypeScript source files.
+    // Including them in `include` causes Vite to pre-bundle AND watch them
+    // at the same time, which triggers cascading "module not found" errors
+    // during HMR. Vite resolves workspace source packages natively — no
+    // explicit entry needed here.
     exclude: ["@xenova/transformers"],
   },
 });

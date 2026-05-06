@@ -99,7 +99,7 @@ export function OnboardingShell({
   }, [onBack, onNext, nextDisabled]);
 
   return (
-    <div className="relative flex h-full min-h-screen w-full flex-col overflow-hidden bg-bg text-text">
+    <div className="relative flex h-full min-h-screen w-full flex-col overflow-x-hidden bg-bg text-text">
       {/* Decorative background ----------------------------------------- */}
       <div
         aria-hidden
@@ -115,7 +115,7 @@ export function OnboardingShell({
       />
 
       {/* Top brand row -------------------------------------------------- */}
-      <header className="safe-top relative z-10 flex items-center justify-between px-6 py-5 sm:px-10">
+      <header className="safe-top relative z-10 flex items-center justify-between px-6 py-3 sm:px-10">
         <div className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-gradient shadow-glow">
             <Sparkles className="h-4 w-4 text-white" />
@@ -133,33 +133,33 @@ export function OnboardingShell({
       </header>
 
       {/* Main card ------------------------------------------------------ */}
-      <main className="relative z-10 flex flex-1 items-center justify-center px-4 py-6 sm:px-6">
+      <main className="relative z-10 flex flex-1 items-center justify-center overflow-x-hidden px-4 py-3 sm:px-6">
         <div
           key={stepIndex} // re-mount per step → triggers fade-in animation
           className={clsx(
-            "vx-panel relative w-full max-w-xl animate-fade-in p-6 sm:p-8",
+            "vx-panel relative w-full max-w-xl animate-fade-in p-4 sm:p-6",
           )}
         >
           {eyebrow && (
-            <div className="vx-eyebrow mb-2 flex items-center gap-2">
+            <div className="vx-eyebrow mb-1.5 flex items-center gap-2">
               {eyebrow}
             </div>
           )}
-          <h1 className="font-display text-2xl font-semibold tracking-tight text-text sm:text-3xl">
+          <h1 className="font-display text-xl font-semibold tracking-tight text-text sm:text-2xl">
             {title}
           </h1>
           {description && (
-            <p className="mt-2 text-sm leading-relaxed text-text-subtle">
+            <p className="mt-1 text-sm leading-relaxed text-text-subtle">
               {description}
             </p>
           )}
-          <div className="mt-6">{children}</div>
+          <div className="mt-4">{children}</div>
         </div>
       </main>
 
       {/* Footer --------------------------------------------------------- */}
       <footer className="safe-bottom relative z-10 border-t border-border/60 bg-surface/70 backdrop-blur supports-[backdrop-filter]:bg-surface/60">
-        <div className="mx-auto flex max-w-xl items-center justify-between gap-3 px-4 py-3 sm:px-8 sm:py-4">
+        <div className="mx-auto flex max-w-xl items-center justify-between gap-3 px-4 py-2 sm:px-8 sm:py-3">
           <div className="flex min-h-[2.25rem] items-center gap-2 text-xs text-muted">
             {footerLeft}
           </div>
