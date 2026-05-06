@@ -50,20 +50,25 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
 
   upsertSegment: (segment) =>
     set((state) => {
-      // Update interim slot if it matches by id; otherwise replace.
+      // Interim update: just replace whatever is in the interim slot.
+      // We deliberately don't key partials by id — the engine sends a
+      // single `seg-live` interim and a separate `seg-<startMs>` final
+      // for each utterance, and trying to track them by id leaves the
+      // old partial stuck on screen after its final has already arrived.
       if (!segment.isFinal) {
         return { interim: segment };
       }
-      // Final: clear interim if it had the same id, push to finals.
-      const interim =
-        state.interim && state.interim.id === segment.id ? null : state.interim;
-      // Replace if a final with same id already exists, else append.
+
+      // Final segment: it implicitly supersedes the live partial, so
+      // always clear the interim. (Without this, the previous partial
+      // text lingers under the new final until the next partial arrives,
+      // which causes the "duplicate trailing words" effect users see.)
       const idx = state.finals.findIndex((s) => s.id === segment.id);
       const finals =
         idx >= 0
           ? state.finals.map((s, i) => (i === idx ? segment : s))
           : [...state.finals, segment];
-      return { finals, interim };
+      return { finals, interim: null };
     }),
 
   clear: () => set({ finals: [], interim: null, lastError: null }),

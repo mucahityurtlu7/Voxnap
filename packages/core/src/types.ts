@@ -7,7 +7,19 @@
  * Keep this file framework-agnostic — no React, no Tauri imports.
  */
 
-/** Whisper model identifiers we ship. */
+/**
+ * Whisper model identifiers we ship.
+ *
+ * IDs match the file naming convention used on HuggingFace's
+ * `ggerganov/whisper.cpp` repository. The dot before the quant suffix
+ * (e.g. `.q5_1`) becomes a dash in the actual filename
+ * (`ggml-base-q5_1.bin`), but the `.en` infix is kept as-is — see
+ * `hfFileName()` in `scripts/fetch-model.mjs` and `hf_url_for` in
+ * `apps/desktop/src-tauri/src/models.rs`.
+ *
+ * Only quantizations that actually exist on HF are listed; medium has no
+ * q5_1 variant (only q5_0), and the large/turbo families likewise.
+ */
 export type WhisperModelId =
   | "tiny.q5_1"
   | "tiny.en.q5_1"
@@ -15,7 +27,10 @@ export type WhisperModelId =
   | "base.en.q5_1"
   | "small.q5_1"
   | "small.en.q5_1"
-  | "medium.q5_1";
+  | "medium.q5_0"
+  | "medium.en.q5_0"
+  | "large-v3.q5_0"
+  | "large-v3-turbo.q5_0";
 
 export interface WhisperModelInfo {
   id: WhisperModelId;
@@ -36,8 +51,12 @@ export const WHISPER_MODELS: Record<WhisperModelId, WhisperModelInfo> = {
   "base.en.q5_1": { id: "base.en.q5_1", label: "Base (English)", approxSizeMb: 57, englishOnly: true },
   "small.q5_1": { id: "small.q5_1", label: "Small (multilingual)", approxSizeMb: 181, englishOnly: false },
   "small.en.q5_1": { id: "small.en.q5_1", label: "Small (English)", approxSizeMb: 181, englishOnly: true },
-  "medium.q5_1": { id: "medium.q5_1", label: "Medium (multilingual)", approxSizeMb: 539, englishOnly: false },
+  "medium.q5_0": { id: "medium.q5_0", label: "Medium (multilingual)", approxSizeMb: 539, englishOnly: false },
+  "medium.en.q5_0": { id: "medium.en.q5_0", label: "Medium (English)", approxSizeMb: 539, englishOnly: true },
+  "large-v3.q5_0": { id: "large-v3.q5_0", label: "Large v3 (multilingual)", approxSizeMb: 1080, englishOnly: false },
+  "large-v3-turbo.q5_0": { id: "large-v3-turbo.q5_0", label: "Large v3 Turbo (multilingual)", approxSizeMb: 547, englishOnly: false },
 };
+
 
 /** Audio input device exposed by the host (Tauri or browser). */
 export interface AudioDevice {

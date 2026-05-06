@@ -7,22 +7,39 @@
 //! Streaming strategy
 //! ------------------
 //!
-//! Sliding window with overlap:
+//! VAD-driven **utterance segmentation** (NOT a sliding window):
 //!
-//!  • Accumulate ~`window_secs` of audio (e.g. 5s) into a rolling buffer.
-//!  • Run `whisper.full()` on the latest window each tick.
-//!  • Each whisper segment is rebased to **absolute timeline** (ms since
-//!    capture started) and emitted with a stable id `seg-<absStartMs>`.
-//!  • Segments are emitted as `isFinal: false` while their end-time still
-//!    falls inside the next-step window. Once the window slides past them,
-//!    they're re-emitted with `isFinal: true` and won't be touched again.
+//!  • Continuously drain audio from the ring buffer in ~30 ms frames.
+//!  • Track per-frame RMS to decide speech vs. silence (with hysteresis).
+//!  • While silent: keep a small 200 ms pre-roll buffer rolling so that the
+//!    very first phoneme of the next utterance is not lost.
+//!  • On speech onset: open a new utterance and start accumulating frames.
+//!  • Every ~1500 ms during an active utterance: run whisper on the
+//!    accumulated audio so far and emit it as a *partial* segment with a
+//!    stable `seg-live` id. The UI replaces the same interim slot each
+//!    time, so the live transcript appears to grow naturally.
+//!  • On silence ≥ 600 ms (or hard cap of 15 s): run whisper one last time
+//!    on the full utterance, emit it as `is_final: true` with a unique
+//!    timestamp-based id (`seg-<startMs>`), and reset state.
 //!
-//! The JS side's transcription store keys on `id` so partial → final is
-//! a clean replace.
+//! Why this matters
+//! ----------------
+//! The previous design ran whisper on every overlapping 5 s window once
+//! per second. That re-transcribed the same audio up to five times,
+//! producing slightly different segment boundaries each pass, which broke
+//! ID stability and resulted in *the same words being emitted multiple
+//! times as different finals*. It also made hallucinations on background
+//! noise very common because whisper hates being fed the same audio
+//! repeatedly with no context.
+//!
+//! With utterance-based segmentation each chunk of speech is transcribed
+//! exactly once (plus a few interim peeks while it is still in progress),
+//! which fixes both the duplication problem and the hallucination
+//! problem in one shot.
 //!
 //! Audio-level (RMS / peak) is computed on every drain pass and emitted
 //! at `voxnap://audio-level` so the UI's waveform animates from the very
-//! first frame, even before the first 5 s window is ready.
+//! first frame, even before the first utterance is finalised.
 //!
 //! Event names match `packages/core/src/engine/TauriEngine.ts`:
 //!   • `voxnap://segment`
@@ -30,7 +47,7 @@
 //!   • `voxnap://state-change`
 //!   • `voxnap://error`
 
-use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -71,15 +88,14 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub threads: Option<i32>,
 
-    /// Energy-based VAD RMS threshold. Whisper is skipped if the window's
-    /// RMS falls below this value — saves CPU and suppresses hallucinations
-    /// on silence. `None` → use the built-in default (0.012).
-    /// Set to `Some(0.0)` to effectively disable VAD.
+    /// Energy-based VAD RMS threshold. A frame counts as "speech" only when
+    /// its RMS is above this value. `None` → use the built-in default
+    /// (0.012). Set to `Some(0.0)` to effectively disable VAD.
     #[serde(default)]
     pub vad_threshold: Option<f32>,
 
-    /// When `false` VAD is completely bypassed and whisper always runs,
-    /// even on silent input. Defaults to `true`.
+    /// When `false` VAD is bypassed and the engine treats every frame as
+    /// speech. Defaults to `true`.
     #[serde(default = "default_vad_enabled")]
     pub vad_enabled: bool,
 }
@@ -225,28 +241,64 @@ pub fn spawn(
         }
 
         // ─────────────────────────────────────────────────────────────────
-        // Sliding-window state (in 16k mono float32 samples).
+        // VAD-based segmentation state.
+        //
+        // All buffers are 16k mono float32. Sample counts are absolute (i.e.
+        // since capture started) so timestamps survive across drains.
         // ─────────────────────────────────────────────────────────────────
         let sr = TARGET_SAMPLE_RATE as usize;
-        let window_samples = sr * 5; // 5 s window
-        let step_samples = sr; // 1 s step
+        let frame_samples = (sr * 30) / 1000; // 30 ms = 480 samples
 
-        let mut buffer: Vec<f32> = Vec::with_capacity(window_samples * 2);
-        // How many samples have already slid off the front of the buffer.
+        // VAD knobs
+        let vad_enabled = cfg.vad_enabled;
+        let vad_threshold = cfg.vad_threshold.unwrap_or(0.012);
+        // Hysteresis: how much consecutive silence ends an utterance, and
+        // how short a "speech burst" we will still bother transcribing.
+        let min_silence_samples: usize = (sr * 600) / 1000; // 600 ms
+        let min_speech_samples: usize = (sr * 250) / 1000; //  250 ms
+        let max_utterance_samples: usize = sr * 15; // 15 s hard cap
+        // Tail of trailing silence kept in the audio fed to whisper so the
+        // last syllable doesn't get clipped.
+        let tail_keep_samples: usize = sr / 10; // 100 ms
+        // Pre-roll: rolling buffer kept *during* silence so we can prepend
+        // it to a new utterance and keep the leading consonant.
+        let preroll_samples: usize = sr / 5; // 200 ms
+
+        let mut preroll: VecDeque<f32> = VecDeque::with_capacity(preroll_samples + 1);
+
+        // Active utterance.
+        let mut utterance: Vec<f32> = Vec::with_capacity(sr * 5);
+        let mut utterance_start_ms: Option<i64> = None;
+        let mut trailing_silence_samples: usize = 0;
+
+        // Total samples drained from the ring buffer since `start`.
         let mut consumed_offset_samples: u64 = 0;
-        // IDs we've already promoted to final — never re-emit.
-        let mut finalized: HashSet<String> = HashSet::new();
-        // Most recent partial we've emitted per id; lets us skip redundant
-        // re-emits for unchanged interim segments.
-        let mut last_partial_text: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
 
-        let mut tick = tokio::time::interval(Duration::from_millis(150));
+        // Partial-emission scheduling.
+        let partial_interval = Duration::from_millis(1500);
+        let mut next_partial_at = tokio::time::Instant::now() + partial_interval;
+        let mut last_partial_text = String::new();
+
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
+                        // Best-effort flush of any speech that was in progress
+                        // when the user hit stop. We don't want the last
+                        // sentence to vanish.
+                        if utterance.len() >= min_speech_samples {
+                            let start_ms = utterance_start_ms.unwrap_or(0);
+                            finalise_utterance(
+                                &app,
+                                ctx.as_mut(),
+                                &cfg,
+                                &utterance,
+                                start_ms,
+                                sr,
+                            );
+                        }
                         break;
                     }
                 }
@@ -260,148 +312,135 @@ pub fn spawn(
                         popped.extend_from_slice(&chunk[..n]);
                     }
 
-                    if !popped.is_empty() {
-                        let (rms, peak) = level_of(&popped);
-                        let _ = app.emit(
-                            "voxnap://audio-level",
-                            AudioLevelEvent { rms, peak, at: now_ms() },
+                    if popped.is_empty() {
+                        // No audio this tick. Still let the partial timer run
+                        // so an in-progress utterance can publish what it has.
+                        emit_partial_if_due(
+                            &app,
+                            ctx.as_mut(),
+                            &cfg,
+                            &utterance,
+                            utterance_start_ms,
+                            min_speech_samples,
+                            sr,
+                            &mut next_partial_at,
+                            partial_interval,
+                            &mut last_partial_text,
                         );
-                        buffer.extend_from_slice(&popped);
-                    }
-
-                    // Need at least a full window before we run inference.
-                    if buffer.len() < window_samples {
                         continue;
                     }
 
-                    // ── 2. Build the current window (the last 5 s) ────────
-                    let window_start_in_buf = buffer.len() - window_samples;
-                    let window_start_abs_samples =
-                        consumed_offset_samples + window_start_in_buf as u64;
-                    let window_start_abs_ms =
-                        (window_start_abs_samples * 1000 / sr as u64) as i64;
-                    let window = &buffer[window_start_in_buf..];
+                    // Surface a level reading immediately so the waveform
+                    // never looks frozen even when whisper is idle.
+                    let (rms, peak) = level_of(&popped);
+                    let _ = app.emit(
+                        "voxnap://audio-level",
+                        AudioLevelEvent { rms, peak, at: now_ms() },
+                    );
 
-                    // Cheap energy-based VAD: skip whisper if the window is
-                    // basically silent — saves a lot of CPU and avoids
-                    // hallucinations on background noise.
-                    // The threshold and enabled flag come from the user's
-                    // config; fall back to the built-in default of 0.012.
-                    let (win_rms, _) = level_of(window);
-                    let vad_threshold = cfg.vad_threshold.unwrap_or(0.012);
-                    let speech = !cfg.vad_enabled || win_rms >= vad_threshold;
+                    // ── 2. Walk the batch one VAD frame at a time ─────────
+                    let mut frame_start = 0usize;
+                    while frame_start < popped.len() {
+                        let frame_end = (frame_start + frame_samples).min(popped.len());
+                        let frame = &popped[frame_start..frame_end];
+                        let frame_abs_start =
+                            consumed_offset_samples + frame_start as u64;
 
-                    // ── 3. Run whisper (or skip on silence / no model) ────
-                    let segments: Vec<RawSegment> = if speech {
-                        match ctx.as_mut() {
-                            Some(c) => c.transcribe(window, &cfg).unwrap_or_else(|e| {
-                                tracing::error!("whisper transcribe failed: {e}");
-                                let _ = app.emit(
-                                    "voxnap://error",
-                                    EngineErrorEvent {
-                                        code: "engine-internal",
-                                        message: e.to_string(),
-                                    },
+                        let (frame_rms, _) = level_of(frame);
+                        let is_speech = !vad_enabled || frame_rms >= vad_threshold;
+
+                        if utterance_start_ms.is_some() {
+                            // We're inside an utterance — keep accumulating.
+                            utterance.extend_from_slice(frame);
+                            if is_speech {
+                                trailing_silence_samples = 0;
+                            } else {
+                                trailing_silence_samples += frame.len();
+                            }
+
+                            let speech_samples = utterance
+                                .len()
+                                .saturating_sub(trailing_silence_samples);
+                            let end_by_silence = trailing_silence_samples
+                                >= min_silence_samples
+                                && speech_samples >= min_speech_samples;
+                            let end_by_length = utterance.len() >= max_utterance_samples;
+
+                            if end_by_silence || end_by_length {
+                                // Trim most of the trailing silence — keep a
+                                // short tail so the final syllable doesn't
+                                // get clipped by whisper's end-of-audio.
+                                let trim = trailing_silence_samples
+                                    .saturating_sub(tail_keep_samples);
+                                if trim > 0 && utterance.len() > trim {
+                                    let new_len = utterance.len() - trim;
+                                    utterance.truncate(new_len);
+                                }
+
+                                let start_ms = utterance_start_ms.unwrap();
+                                finalise_utterance(
+                                    &app,
+                                    ctx.as_mut(),
+                                    &cfg,
+                                    &utterance,
+                                    start_ms,
+                                    sr,
                                 );
-                                Vec::new()
-                            }),
-                            None => Vec::new(),
-                        }
-                    } else {
-                        Vec::new()
-                    };
 
-
-                    // After the upcoming slide, the window starts here:
-                    let next_window_start_abs_ms = window_start_abs_ms
-                        + ((step_samples as u64) * 1000 / sr as u64) as i64;
-
-                    // ── Partition segments into finals and partials ────────
-                    //
-                    // Final segments get a stable abs-time id and go directly
-                    // into the JS `finals[]` array.
-                    //
-                    // Non-final segments are merged into a single "seg-live"
-                    // event that always updates the same interim slot on the
-                    // JS side.  Without this, every tick produces a brand-new
-                    // id (because window_start_abs_ms shifts by ~1 s each
-                    // step), the old interim is orphaned, and the UI looks
-                    // like it is constantly deleting and restarting the text.
-                    let language = if cfg.language == "auto" {
-                        None
-                    } else {
-                        Some(cfg.language.clone())
-                    };
-
-                    let mut partial_texts: Vec<String> = Vec::new();
-
-                    for seg in segments {
-                        let abs_start = window_start_abs_ms + seg.start_ms;
-                        let abs_end = window_start_abs_ms + seg.end_ms;
-                        let id = format!("seg-{}", abs_start);
-
-                        if finalized.contains(&id) {
-                            continue;
-                        }
-
-                        let is_final = abs_end <= next_window_start_abs_ms;
-                        let text = seg.text.trim().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-
-                        if is_final {
-                            last_partial_text.remove(&id);
-                            finalized.insert(id.clone());
-                            let _ = app.emit(
-                                "voxnap://segment",
-                                EmittedSegment {
-                                    id,
-                                    text,
-                                    start_ms: abs_start,
-                                    end_ms: abs_end,
-                                    is_final: true,
-                                    confidence: seg.confidence,
-                                    language: language.clone(),
-                                },
-                            );
+                                // Reset state for the next utterance.
+                                utterance.clear();
+                                utterance_start_ms = None;
+                                trailing_silence_samples = 0;
+                                last_partial_text.clear();
+                            }
                         } else {
-                            partial_texts.push(text);
+                            // Idle — keep the rolling pre-roll fresh so the
+                            // *next* utterance gets its leading edge.
+                            for &s in frame {
+                                if preroll.len() == preroll_samples {
+                                    preroll.pop_front();
+                                }
+                                preroll.push_back(s);
+                            }
+
+                            if is_speech {
+                                // Open a new utterance, prepending pre-roll.
+                                let preroll_len = preroll.len() as u64;
+                                let utt_offset =
+                                    frame_abs_start.saturating_sub(preroll_len);
+                                let start_ms =
+                                    (utt_offset * 1000 / sr as u64) as i64;
+
+                                utterance.clear();
+                                utterance.reserve(preroll.len() + frame.len());
+                                utterance.extend(preroll.drain(..));
+                                utterance.extend_from_slice(frame);
+                                utterance_start_ms = Some(start_ms);
+                                trailing_silence_samples = 0;
+                                last_partial_text.clear();
+                                next_partial_at =
+                                    tokio::time::Instant::now() + partial_interval;
+                            }
                         }
+
+                        frame_start = frame_end;
                     }
 
-                    // Emit all in-progress partial text as a single stable
-                    // "seg-live" event so the interim slot never flickers.
-                    if !partial_texts.is_empty() {
-                        let combined = partial_texts.join(" ");
-                        let changed = last_partial_text
-                            .get("seg-live")
-                            .map(|p| p != &combined)
-                            .unwrap_or(true);
-                        if changed {
-                            last_partial_text.insert("seg-live".to_string(), combined.clone());
-                            let window_end_abs_ms = window_start_abs_ms
-                                + (window_samples as i64 * 1000 / sr as i64);
-                            let _ = app.emit(
-                                "voxnap://segment",
-                                EmittedSegment {
-                                    id: "seg-live".to_string(),
-                                    text: combined,
-                                    start_ms: window_start_abs_ms,
-                                    end_ms: window_end_abs_ms,
-                                    is_final: false,
-                                    confidence: None,
-                                    language: language.clone(),
-                                },
-                            );
-                        }
-                    }
+                    consumed_offset_samples += popped.len() as u64;
 
-                    // ── 4. Slide the window forward by `step_samples` ────
-                    if buffer.len() >= window_samples + step_samples {
-                        buffer.drain(0..step_samples);
-                        consumed_offset_samples += step_samples as u64;
-                    }
+                    // ── 3. If a partial is due, emit it ───────────────────
+                    emit_partial_if_due(
+                        &app,
+                        ctx.as_mut(),
+                        &cfg,
+                        &utterance,
+                        utterance_start_ms,
+                        min_speech_samples,
+                        sr,
+                        &mut next_partial_at,
+                        partial_interval,
+                        &mut last_partial_text,
+                    );
                 }
             }
         }
@@ -419,8 +458,6 @@ struct EngineErrorEvent {
 #[derive(Debug, Clone)]
 struct RawSegment {
     text: String,
-    start_ms: i64,
-    end_ms: i64,
     confidence: Option<f32>,
 }
 
@@ -448,6 +485,135 @@ fn level_of(samples: &[f32]) -> (f32, f32) {
     (rms.min(1.0), peak.min(1.0))
 }
 
+fn lang_or_none(cfg: &WhisperConfig) -> Option<String> {
+    if cfg.language == "auto" || cfg.language.is_empty() {
+        None
+    } else {
+        Some(cfg.language.clone())
+    }
+}
+
+fn combine_text(segments: &[RawSegment]) -> String {
+    let mut out = String::new();
+    for s in segments {
+        let t = s.text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(t);
+    }
+    out
+}
+
+fn avg_confidence(segments: &[RawSegment]) -> Option<f32> {
+    let confs: Vec<f32> = segments.iter().filter_map(|s| s.confidence).collect();
+    if confs.is_empty() {
+        None
+    } else {
+        Some(confs.iter().sum::<f32>() / confs.len() as f32)
+    }
+}
+
+/// Run whisper on the in-progress utterance and emit it as a final segment.
+fn finalise_utterance(
+    app: &AppHandle,
+    ctx: Option<&mut WhisperCtx>,
+    cfg: &WhisperConfig,
+    utterance: &[f32],
+    start_ms: i64,
+    sr: usize,
+) {
+    let len_ms = (utterance.len() as i64 * 1000) / sr as i64;
+    let end_ms = start_ms + len_ms;
+    let Some(c) = ctx else { return };
+
+    match c.transcribe(utterance, cfg) {
+        Ok(segments) => {
+            let text = combine_text(&segments);
+            if text.is_empty() {
+                return;
+            }
+            let _ = app.emit(
+                "voxnap://segment",
+                EmittedSegment {
+                    id: format!("seg-{start_ms}"),
+                    text,
+                    start_ms,
+                    end_ms,
+                    is_final: true,
+                    confidence: avg_confidence(&segments),
+                    language: lang_or_none(cfg),
+                },
+            );
+        }
+        Err(e) => {
+            tracing::error!("whisper transcribe (final) failed: {e}");
+            let _ = app.emit(
+                "voxnap://error",
+                EngineErrorEvent {
+                    code: "engine-internal",
+                    message: e.to_string(),
+                },
+            );
+        }
+    }
+}
+
+/// If the partial timer has fired and we have enough speech, run whisper on
+/// the in-progress utterance and emit it as `seg-live`.
+#[allow(clippy::too_many_arguments)]
+fn emit_partial_if_due(
+    app: &AppHandle,
+    ctx: Option<&mut WhisperCtx>,
+    cfg: &WhisperConfig,
+    utterance: &[f32],
+    utterance_start_ms: Option<i64>,
+    min_speech_samples: usize,
+    sr: usize,
+    next_partial_at: &mut tokio::time::Instant,
+    partial_interval: Duration,
+    last_partial_text: &mut String,
+) {
+    let Some(start_ms) = utterance_start_ms else { return };
+    if utterance.len() < min_speech_samples {
+        return;
+    }
+    if tokio::time::Instant::now() < *next_partial_at {
+        return;
+    }
+    *next_partial_at = tokio::time::Instant::now() + partial_interval;
+
+    let Some(c) = ctx else { return };
+    let Ok(segments) = c.transcribe(utterance, cfg) else { return };
+    let text = combine_text(&segments);
+    if text.is_empty() {
+        return;
+    }
+    if &text == last_partial_text {
+        // Nothing new to say; skip the emit so the UI doesn't re-render.
+        return;
+    }
+    last_partial_text.clear();
+    last_partial_text.push_str(&text);
+
+    let len_ms = (utterance.len() as i64 * 1000) / sr as i64;
+    let _ = app.emit(
+        "voxnap://segment",
+        EmittedSegment {
+            id: "seg-live".to_string(),
+            text,
+            start_ms,
+            end_ms: start_ms + len_ms,
+            is_final: false,
+            confidence: None,
+            language: lang_or_none(cfg),
+        },
+    );
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // whisper-rs wrapper. Kept private so the only public API of this module is
 // `spawn` + types.
@@ -469,20 +635,49 @@ impl WhisperCtx {
     }
 
     fn transcribe(&mut self, samples: &[f32], cfg: &WhisperConfig) -> Result<Vec<RawSegment>> {
-        let mut params =
-            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        // BeamSearch with a small beam gives noticeably better quality than
+        // Greedy (which the previous implementation used) without making
+        // each utterance unbearably slow on CPU. Whisper.cpp authors
+        // recommend 5 as a sane default for streaming-ish workloads.
+        let mut params = whisper_rs::FullParams::new(
+            whisper_rs::SamplingStrategy::BeamSearch {
+                beam_size: 5,
+                patience: 1.0,
+            },
+        );
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_special(false);
         params.set_print_timestamps(false);
+        // Disables the verbose C-level beam-search decoder logs
+        // ("whisper_full_with_state: id = X, decoder = Y, token = ...").
+        // The flags above only suppress higher-level progress/realtime output;
+        // debug_mode is what gates the per-token beam trace.
+        params.set_debug_mode(false);
+        // We feed whisper a single complete utterance at a time, so:
+        //   • no_context: don't carry tokens across utterances (each one
+        //     stands on its own, which prevents the "model gets stuck on
+        //     a hallucinated theme" failure mode).
+        //   • single_segment: ask whisper to treat the buffer as one
+        //     utterance instead of slicing it internally — cleaner output
+        //     and avoids the boundary-flapping that plagued the old
+        //     sliding-window code.
         params.set_no_context(true);
-        params.set_single_segment(false);
+        params.set_single_segment(true);
         params.set_translate(cfg.translate);
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
-        if cfg.language != "auto" {
-            params.set_language(Some(&cfg.language));
-        }
+
+        // Set language explicitly. `None` = let whisper auto-detect.
+        // If we pass `Some("auto")` whisper.cpp interprets it as the
+        // literal string "auto" and produces broken output.
+        let lang = if cfg.language == "auto" || cfg.language.is_empty() {
+            None
+        } else {
+            Some(cfg.language.as_str())
+        };
+        params.set_language(lang);
+
         if let Some(n) = cfg.threads {
             params.set_n_threads(n);
         }
@@ -518,10 +713,6 @@ impl WhisperCtx {
                 },
             };
 
-            // Timestamps are in centiseconds (10 ms ticks) → convert to ms.
-            let t0 = seg.start_timestamp() * 10;
-            let t1 = seg.end_timestamp() * 10;
-
             // Approx confidence from token probabilities (mean p).
             let n_tok = seg.n_tokens();
             let confidence = if n_tok > 0 {
@@ -542,12 +733,7 @@ impl WhisperCtx {
                 None
             };
 
-            out.push(RawSegment {
-                text,
-                start_ms: t0,
-                end_ms: t1,
-                confidence,
-            });
+            out.push(RawSegment { text, confidence });
         }
         Ok(out)
     }

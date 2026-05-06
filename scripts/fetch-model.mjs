@@ -25,21 +25,31 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 
 const KNOWN_MODELS = [
+  // f16 (full-precision)
   "tiny",
   "tiny.en",
   "base",
   "base.en",
-  "base.q5_1",
   "small",
   "small.en",
-  "small.q5_1",
   "medium",
   "medium.en",
-  "medium.q5_0",
   "large-v3",
   "large-v3-turbo",
+  // q5_1 (multilingual + English-only)
+  "tiny.q5_1",
+  "tiny.en.q5_1",
+  "base.q5_1",
+  "base.en.q5_1",
+  "small.q5_1",
+  "small.en.q5_1",
+  // q5_0 (medium + large families have no q5_1 on HF)
+  "medium.q5_0",
+  "medium.en.q5_0",
+  "large-v3.q5_0",
   "large-v3-turbo.q5_0",
 ];
+
 
 const args = process.argv.slice(2);
 let modelId = "base.q5_1";
@@ -69,11 +79,34 @@ if (!KNOWN_MODELS.includes(modelId)) {
 
 // Local filename keeps dots (e.g. ggml-base.q5_1.bin) — what whisper-rs expects.
 const fileName = `ggml-${modelId}.bin`;
-// Hugging Face repository uses dashes instead of dots for quantized variants
-// (e.g. ggml-base-q5_1.bin).  Convert dots → dashes only for the remote path.
-const hfFileName = `ggml-${modelId.replace(/\./g, "-")}.bin`;
+const hfFileName = toHuggingFaceFileName(modelId);
 const url = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${hfFileName}?download=true`;
+
 const outPath = path.join(outDir, fileName);
+
+/**
+ * Hugging Face repository uses a dash instead of a dot **only** before the
+ * quant suffix (the last `.` in the id). The `.en` infix on English-only
+ * models is preserved as-is. Examples:
+ *   base.q5_1        → ggml-base-q5_1.bin
+ *   tiny.en.q5_1     → ggml-tiny.en-q5_1.bin
+ *   medium.q5_0      → ggml-medium-q5_0.bin
+ *   large-v3         → ggml-large-v3.bin             (no quant suffix)
+ *   tiny             → ggml-tiny.bin                 (no quant suffix)
+ *
+ * The previous implementation replaced *every* `.` with `-`, which broke
+ * English-only quant URLs (`ggml-tiny-en-q5_1.bin` → 404 on HF).
+ */
+function toHuggingFaceFileName(id) {
+  const lastDot = id.lastIndexOf(".");
+  const hasQuantSuffix =
+    lastDot >= 0 && /^q\d/.test(id.slice(lastDot + 1));
+  const hfId = hasQuantSuffix
+    ? `${id.slice(0, lastDot)}-${id.slice(lastDot + 1)}`
+    : id;
+  return `ggml-${hfId}.bin`;
+}
+
 
 fs.mkdirSync(outDir, { recursive: true });
 if (fs.existsSync(outPath)) {

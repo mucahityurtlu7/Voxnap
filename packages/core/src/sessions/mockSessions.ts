@@ -417,7 +417,8 @@ const session7: Session = {
   createdAt: days(12),
   durationMs: s7Segments[s7Segments.length - 1]!.endMs,
   language: "en",
-  modelId: "medium.q5_1",
+  modelId: "medium.q5_0",
+
   tags: [
     { id: "t_lecture", label: "lecture", color: "sky" },
     { id: "t_asr", label: "asr", color: "emerald" },

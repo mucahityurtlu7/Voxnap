@@ -41,15 +41,23 @@ use tokio::sync::{watch, Mutex};
 use crate::error::{Error, Result};
 
 /// Logical id strings — must match `WhisperModelId` in `packages/core`.
+///
+/// Only quantizations that actually exist on
+/// `https://huggingface.co/ggerganov/whisper.cpp/tree/main` are listed.
+/// Notably, `medium` and `large*` only have `q5_0` quants (no `q5_1`).
 pub const KNOWN_MODELS: &[ModelMeta] = &[
-    ModelMeta { id: "tiny.q5_1",     label: "Tiny (multilingual)",  approx_size_mb: 31,  english_only: false },
-    ModelMeta { id: "tiny.en.q5_1",  label: "Tiny (English)",       approx_size_mb: 31,  english_only: true  },
-    ModelMeta { id: "base.q5_1",     label: "Base (multilingual)",  approx_size_mb: 57,  english_only: false },
-    ModelMeta { id: "base.en.q5_1",  label: "Base (English)",       approx_size_mb: 57,  english_only: true  },
-    ModelMeta { id: "small.q5_1",    label: "Small (multilingual)", approx_size_mb: 181, english_only: false },
-    ModelMeta { id: "small.en.q5_1", label: "Small (English)",      approx_size_mb: 181, english_only: true  },
-    ModelMeta { id: "medium.q5_1",   label: "Medium (multilingual)", approx_size_mb: 539, english_only: false },
+    ModelMeta { id: "tiny.q5_1",            label: "Tiny (multilingual)",          approx_size_mb: 31,   english_only: false },
+    ModelMeta { id: "tiny.en.q5_1",         label: "Tiny (English)",               approx_size_mb: 31,   english_only: true  },
+    ModelMeta { id: "base.q5_1",            label: "Base (multilingual)",          approx_size_mb: 57,   english_only: false },
+    ModelMeta { id: "base.en.q5_1",         label: "Base (English)",               approx_size_mb: 57,   english_only: true  },
+    ModelMeta { id: "small.q5_1",           label: "Small (multilingual)",         approx_size_mb: 181,  english_only: false },
+    ModelMeta { id: "small.en.q5_1",        label: "Small (English)",              approx_size_mb: 181,  english_only: true  },
+    ModelMeta { id: "medium.q5_0",          label: "Medium (multilingual)",        approx_size_mb: 539,  english_only: false },
+    ModelMeta { id: "medium.en.q5_0",       label: "Medium (English)",             approx_size_mb: 539,  english_only: true  },
+    ModelMeta { id: "large-v3.q5_0",        label: "Large v3 (multilingual)",      approx_size_mb: 1080, english_only: false },
+    ModelMeta { id: "large-v3-turbo.q5_0",  label: "Large v3 Turbo (multilingual)", approx_size_mb: 547, english_only: false },
 ];
+
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelMeta {
@@ -80,13 +88,60 @@ fn file_name_for(model_id: &str) -> String {
     format!("ggml-{model_id}.bin")
 }
 
-/// Hugging Face uses dashes instead of dots in quantised model paths.
+/// Hugging Face uses a dash instead of a dot **only** before the quant
+/// suffix. The `.en` infix on English-only models is preserved as-is.
+///
+/// Examples:
+///   `base.q5_1`        → `ggml-base-q5_1.bin`
+///   `tiny.en.q5_1`     → `ggml-tiny.en-q5_1.bin`
+///   `medium.q5_0`      → `ggml-medium-q5_0.bin`
+///   `large-v3.q5_0`    → `ggml-large-v3-q5_0.bin`
+///
+/// Naively replacing every `.` with `-` (the previous behaviour) produced
+/// 404s for English-only quants because the canonical path on HF still
+/// uses `.en`.
+fn hf_file_name_for(model_id: &str) -> String {
+    let hf_id = match model_id.rsplit_once('.') {
+        // Convert only the last `.` (the one separating the quant suffix).
+        Some((prefix, suffix)) => format!("{prefix}-{suffix}"),
+        None => model_id.to_string(),
+    };
+    format!("ggml-{hf_id}.bin")
+}
+
 fn hf_url_for(model_id: &str) -> String {
-    let hf_name = format!("ggml-{}.bin", model_id.replace('.', "-"));
+    let hf_name = hf_file_name_for(model_id);
     format!(
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{hf_name}?download=true"
     )
 }
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn hf_filename_handles_quant_only() {
+        assert_eq!(hf_file_name_for("base.q5_1"), "ggml-base-q5_1.bin");
+        assert_eq!(hf_file_name_for("medium.q5_0"), "ggml-medium-q5_0.bin");
+    }
+
+    #[test]
+    fn hf_filename_preserves_english_infix() {
+        assert_eq!(hf_file_name_for("tiny.en.q5_1"), "ggml-tiny.en-q5_1.bin");
+        assert_eq!(hf_file_name_for("medium.en.q5_0"), "ggml-medium.en-q5_0.bin");
+    }
+
+    #[test]
+    fn hf_filename_handles_dashes_in_id() {
+        assert_eq!(hf_file_name_for("large-v3.q5_0"), "ggml-large-v3-q5_0.bin");
+        assert_eq!(
+            hf_file_name_for("large-v3-turbo.q5_0"),
+            "ggml-large-v3-turbo-q5_0.bin"
+        );
+    }
+}
+
 
 /// Writable directory: `<app-data>/models`. Created on demand.
 pub fn writable_models_dir(app: &AppHandle) -> Result<PathBuf> {

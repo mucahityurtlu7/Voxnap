@@ -18,10 +18,12 @@ import { create } from "zustand";
 import {
   AI_PROVIDERS,
   DEFAULT_MODEL,
+  WHISPER_MODELS,
   type AiProvider,
   type SummaryLength,
   type WhisperModelId,
 } from "../types.js";
+
 
 /** Names of every step in the wizard, in display order. */
 export const ONBOARDING_STEPS = [
@@ -128,12 +130,22 @@ function readState(): OnboardingChoices & {
     )
       ? (parsed.step as OnboardingStep)
       : DEFAULTS.step;
+    // Hardening: an older build may have persisted a model id we no longer
+    // recognise (e.g. the bogus `medium.q5_1` that doesn't exist on HF).
+    // Fall back to DEFAULT_MODEL so the engine doesn't immediately fail
+    // with `model-not-found` on the next launch.
+    const modelId =
+      parsed.modelId && parsed.modelId in WHISPER_MODELS
+        ? (parsed.modelId as WhisperModelId)
+        : DEFAULTS.modelId;
     return {
       ...DEFAULTS,
       ...parsed,
       aiProvider: provider,
       step,
+      modelId,
     };
+
   } catch {
     return { ...DEFAULTS };
   }
