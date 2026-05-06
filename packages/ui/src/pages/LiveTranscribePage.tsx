@@ -14,7 +14,7 @@
  * On smaller screens the AI panel collapses to a Tabs-style toggle below
  * the transcript.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Copy,
   Eraser,
@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   DEFAULT_MODEL,
+  useOnboardingStore,
   useTranscriptionStore,
   type Session,
   type WhisperModelId,
@@ -49,11 +50,20 @@ import { useToasts } from "../components/ui/Toast.js";
 export interface LiveTranscribePageProps {
   modelId?: WhisperModelId;
   language?: string;
+  /** When true, whisper transcribes-and-translates into English. */
+  translate?: boolean;
+  /** VAD RMS threshold (0..1). Passed to the engine on init. Default 0.012. */
+  vadThreshold?: number;
+  /** When false, VAD is bypassed and whisper always runs. Default true. */
+  vadEnabled?: boolean;
 }
 
 export function LiveTranscribePage({
   modelId = DEFAULT_MODEL,
   language = "auto",
+  translate = false,
+  vadThreshold = 0.012,
+  vadEnabled = true,
 }: LiveTranscribePageProps) {
   const t = useTranscription();
   const summarizer = useSummarizer();
@@ -62,10 +72,38 @@ export function LiveTranscribePage({
   const lastError = useTranscriptionStore((s) => s.lastError);
   const clearError = useTranscriptionStore((s) => s.setError);
 
-  const [deviceId, setDeviceId] = useState<string | undefined>(undefined);
-  const [initialised, setInitialised] = useState(false);
+  // Seed the input device from the onboarding store so the user's first
+  // recording uses the mic they verified during the welcome wizard.
+  const onboardingMic = useOnboardingStore((s) => s.micDeviceId);
+  const setOnboardingMic = useOnboardingStore((s) => s.setMicDeviceId);
+  const [deviceId, setDeviceIdLocal] = useState<string | undefined>(
+    onboardingMic || undefined,
+  );
+
+  // Persist the user's runtime mic pick back into the onboarding store
+  // (same pattern as language / model). The actual capture device is
+  // applied at `engine.start(deviceId)` time — DeviceSelect is disabled
+  // while a session is running, so we never need to mid-flight switch.
+  const setDeviceId = useCallback(
+    (next: string | undefined) => {
+      setDeviceIdLocal(next);
+      setOnboardingMic(next ?? "");
+    },
+    [setOnboardingMic],
+  );
+
   const [view, setView] = useState<"transcript" | "ai">("transcript");
   const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  // Track the last config we applied so we can re-init the engine when the
+  // user changes language / model / translate / VAD from anywhere in the UI.
+  const lastConfigRef = useRef<{
+    modelId: WhisperModelId;
+    language: string;
+    translate: boolean;
+    vadThreshold: number;
+    vadEnabled: boolean;
+  } | null>(null);
 
   const startedAtRef = useRef<number | null>(null);
   const [, forceTick] = useState(0);
@@ -85,15 +123,35 @@ export function LiveTranscribePage({
     return () => clearTimeout(id);
   }, [lastError, toast, clearError]);
 
-  // Lazily initialise the engine on first mount.
+  // Initialise the engine on first mount, and re-initialise it any time
+  // the user picks a different model / language / translate option from
+  // anywhere in the app (Topbar, Settings, command palette, …). Without
+  // this, whisper.cpp keeps running with whatever language was passed
+  // first — typically the onboarding default of `"auto"` — and the
+  // user's later language change is silently ignored.
   useEffect(() => {
-    if (initialised) return;
+    const next = { modelId, language, translate, vadThreshold, vadEnabled };
+    const prev = lastConfigRef.current;
+    if (
+      prev &&
+      prev.modelId === next.modelId &&
+      prev.language === next.language &&
+      prev.translate === next.translate &&
+      prev.vadThreshold === next.vadThreshold &&
+      prev.vadEnabled === next.vadEnabled
+    ) {
+      return;
+    }
+
     let cancelled = false;
-    t.init({ modelId, language })
-      .then(() => {
-        if (!cancelled) setInitialised(true);
-      })
-      .catch((err) => {
+    const wasRunning = t.engineState === "running";
+
+    (async () => {
+      try {
+        if (wasRunning) await t.stop();
+        await t.init({ modelId, language, translate, vadThreshold, vadEnabled });
+        if (!cancelled) lastConfigRef.current = next;
+      } catch (err) {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error("[voxnap] engine init failed:", err);
@@ -105,11 +163,17 @@ export function LiveTranscribePage({
           tone: "danger",
           duration: 6000,
         });
-      });
+      }
+    })();
+
     return () => {
       cancelled = true;
     };
-  }, [t, modelId, language, initialised, toast]);
+    // `t` is a stable hook handle; the engine itself is reused across
+    // re-inits so we deliberately exclude it from the dep list to avoid
+    // double-initing on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelId, language, translate, vadThreshold, vadEnabled]);
 
 
   // Track recording start for the elapsed timer.

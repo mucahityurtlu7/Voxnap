@@ -8,18 +8,30 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::models::DownloadRegistry;
 use crate::whisper::WhisperConfig;
 
 /// Top-level state registered with `tauri::Builder::manage`.
-#[derive(Default)]
 pub struct AppState {
     pub session: Arc<Mutex<Option<Session>>>,
     pub config: Arc<Mutex<Option<WhisperConfig>>>,
+    /// Tracks in-flight model downloads so the UI can cancel them.
+    pub downloads: Arc<DownloadRegistry>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            session: Arc::new(Mutex::new(None)),
+            config: Arc::new(Mutex::new(None)),
+            downloads: Arc::new(DownloadRegistry::new()),
+        }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

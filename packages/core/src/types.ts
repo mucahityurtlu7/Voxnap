@@ -89,6 +89,16 @@ export interface EngineConfig {
   translate?: boolean;
   /** Number of threads for whisper.cpp (Tauri only). */
   threads?: number;
+  /**
+   * Energy-based VAD RMS threshold (0..1). Whisper is skipped when the
+   * window RMS is below this value. Tauri only; defaults to 0.012.
+   */
+  vadThreshold?: number;
+  /**
+   * When `false`, VAD is bypassed and whisper always runs on every window.
+   * Tauri only; defaults to `true`.
+   */
+  vadEnabled?: boolean;
 }
 
 /** Lifecycle states a transcription engine can be in. */

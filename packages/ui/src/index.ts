@@ -14,6 +14,11 @@ export {
   useSummarizer,
 } from "./engine/SummarizerProvider.js";
 export { SessionsBootstrap } from "./engine/SessionsBootstrap.js";
+export {
+  ModelManagerProvider,
+  useModelManager,
+  useOptionalModelManager,
+} from "./engine/ModelManagerProvider.js";
 
 // ---------- hooks ---------------------------------------------------------
 export { useTranscription } from "./hooks/useTranscription.js";
@@ -27,6 +32,8 @@ export { useLiveAi } from "./hooks/useLiveAi.js";
 export type { LiveAiState, UseLiveAiOptions } from "./hooks/useLiveAi.js";
 export { useOnboarding } from "./hooks/useOnboarding.js";
 export type { UseOnboardingApi } from "./hooks/useOnboarding.js";
+export { useModels } from "./hooks/useModels.js";
+export type { UseModelsApi } from "./hooks/useModels.js";
 
 // ---------- domain components --------------------------------------------
 export { MicButton } from "./components/MicButton.js";
@@ -34,6 +41,8 @@ export { TranscriptView } from "./components/TranscriptView.js";
 export { WaveformBar } from "./components/WaveformBar.js";
 export { DeviceSelect } from "./components/DeviceSelect.js";
 export { LiveAiPanel } from "./components/LiveAiPanel.js";
+export { ModelManagerPanel } from "./components/ModelManagerPanel.js";
+export type { ModelManagerPanelProps } from "./components/ModelManagerPanel.js";
 
 // ---------- design system primitives -------------------------------------
 export * from "./components/ui/index.js";

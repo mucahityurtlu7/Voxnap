@@ -45,6 +45,8 @@ export interface UseOnboardingApi {
     modelId: WhisperModelId;
     language: string;
     translateToEnglish: boolean;
+    vadThreshold: number;
+    vadEnabled: boolean;
     aiProvider: AiProvider;
     aiApiKey: string;
     summaryLength: SummaryLength;
@@ -77,6 +79,8 @@ export function useOnboarding(): UseOnboardingApi {
   const modelId = useOnboardingStore((s) => s.modelId);
   const language = useOnboardingStore((s) => s.language);
   const translateToEnglish = useOnboardingStore((s) => s.translateToEnglish);
+  const vadThreshold = useOnboardingStore((s) => s.vadThreshold);
+  const vadEnabled = useOnboardingStore((s) => s.vadEnabled);
   const aiProvider = useOnboardingStore((s) => s.aiProvider);
   const aiApiKey = useOnboardingStore((s) => s.aiApiKey);
   const summaryLength = useOnboardingStore((s) => s.summaryLength);
@@ -122,6 +126,8 @@ export function useOnboarding(): UseOnboardingApi {
       modelId,
       language,
       translateToEnglish,
+      vadThreshold,
+      vadEnabled,
       aiProvider,
       aiApiKey,
       summaryLength,

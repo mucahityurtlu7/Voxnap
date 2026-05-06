@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import clsx from "clsx";
 import { ChevronDown, Headphones, Mic, Speaker as SpeakerIcon } from "lucide-react";
 import type { AudioDevice } from "@voxnap/core";
@@ -31,20 +31,38 @@ export function DeviceSelect({
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  const refresh = useCallback(
+    async (signal?: { cancelled: boolean }) => {
+      try {
+        const d = await engine.listDevices();
+        if (!signal?.cancelled) setDevices(d);
+      } catch (e) {
+        if (!signal?.cancelled) setError(String(e));
+      }
+    },
+    [engine],
+  );
+
+  // Initial load + re-list whenever the OS reports a hotplug
+  // (mediaDevices.devicechange fires on add/remove on every browser & in
+  // Tauri's webview). Without this, plugging a new mic mid-session never
+  // shows up in the dropdown until the user reloads.
   useEffect(() => {
-    let cancelled = false;
-    engine
-      .listDevices()
-      .then((d) => {
-        if (!cancelled) setDevices(d);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(String(e));
-      });
-    return () => {
-      cancelled = true;
+    const ctl = { cancelled: false };
+    void refresh(ctl);
+
+    const md =
+      typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+    const handler = () => {
+      void refresh();
     };
-  }, [engine]);
+    md?.addEventListener?.("devicechange", handler);
+
+    return () => {
+      ctl.cancelled = true;
+      md?.removeEventListener?.("devicechange", handler);
+    };
+  }, [refresh]);
 
   if (error) {
     return <p className={clsx("text-xs text-rose-500", className)}>{error}</p>;

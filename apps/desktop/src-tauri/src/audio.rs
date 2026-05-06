@@ -60,8 +60,6 @@ pub fn list_devices() -> Result<Vec<AudioDeviceInfo>> {
     Ok(out)
 }
 
-/// Producer side of the audio ring buffer (held by the cpal callback).
-type Producer = ringbuf::HeapProd<f32>;
 /// Consumer side (held by the whisper task).
 pub type Consumer = ringbuf::HeapCons<f32>;
 

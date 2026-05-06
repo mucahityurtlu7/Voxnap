@@ -25,6 +25,7 @@ import {
   DEFAULT_MODEL,
   MicCapture,
   MockEngine,
+  MockModelManager,
   MockSummarizer,
   MemorySessionStore,
   MOCK_SESSIONS,
@@ -35,6 +36,7 @@ import {
 import {
   App,
   EngineProvider,
+  ModelManagerProvider,
   SummarizerProvider,
   SessionsBootstrap,
   ToastProvider,
@@ -91,13 +93,28 @@ const engine = createEngine();
 const summarizer = new MockSummarizer();
 const sessionStore = new MemorySessionStore({ seed: MOCK_SESSIONS });
 
+// On the web, the WasmEngine itself handles model fetching via
+// transformers.js → IndexedDB cache. The Settings/Onboarding model panel
+// is therefore powered by a `MockModelManager`: it shows the catalogue and
+// lets the user explore, but the actual download is performed by the
+// engine on first transcription. We pre-mark the engine's currently
+// configured model as "downloaded" so the UI doesn't nag the user about
+// an install step that doesn't exist on the web.
+const webDefaultModel = (import.meta.env.VITE_MODEL ?? DEFAULT_MODEL) as WhisperModelId;
+const modelManager = new MockModelManager({
+  downloaded: [webDefaultModel],
+  durationMs: 1200,
+});
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ToastProvider>
       <SummarizerProvider summarizer={summarizer}>
         <SessionsBootstrap store={sessionStore}>
           <EngineProvider engine={engine}>
-            <App router="browser" />
+            <ModelManagerProvider manager={modelManager}>
+              <App router="browser" />
+            </ModelManagerProvider>
           </EngineProvider>
         </SessionsBootstrap>
       </SummarizerProvider>

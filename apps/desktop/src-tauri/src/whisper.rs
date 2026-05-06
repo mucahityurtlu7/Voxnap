@@ -70,6 +70,22 @@ pub struct WhisperConfig {
     /// Number of CPU threads for whisper.cpp. `None` → leave as default.
     #[serde(default)]
     pub threads: Option<i32>,
+
+    /// Energy-based VAD RMS threshold. Whisper is skipped if the window's
+    /// RMS falls below this value — saves CPU and suppresses hallucinations
+    /// on silence. `None` → use the built-in default (0.012).
+    /// Set to `Some(0.0)` to effectively disable VAD.
+    #[serde(default)]
+    pub vad_threshold: Option<f32>,
+
+    /// When `false` VAD is completely bypassed and whisper always runs,
+    /// even on silent input. Defaults to `true`.
+    #[serde(default = "default_vad_enabled")]
+    pub vad_enabled: bool,
+}
+
+fn default_vad_enabled() -> bool {
+    true
 }
 
 fn default_lang() -> String {
@@ -269,8 +285,11 @@ pub fn spawn(
                     // Cheap energy-based VAD: skip whisper if the window is
                     // basically silent — saves a lot of CPU and avoids
                     // hallucinations on background noise.
+                    // The threshold and enabled flag come from the user's
+                    // config; fall back to the built-in default of 0.012.
                     let (win_rms, _) = level_of(window);
-                    let speech = win_rms >= 0.012;
+                    let vad_threshold = cfg.vad_threshold.unwrap_or(0.012);
+                    let speech = !cfg.vad_enabled || win_rms >= vad_threshold;
 
                     // ── 3. Run whisper (or skip on silence / no model) ────
                     let segments: Vec<RawSegment> = if speech {
@@ -297,57 +316,85 @@ pub fn spawn(
                     let next_window_start_abs_ms = window_start_abs_ms
                         + ((step_samples as u64) * 1000 / sr as u64) as i64;
 
+                    // ── Partition segments into finals and partials ────────
+                    //
+                    // Final segments get a stable abs-time id and go directly
+                    // into the JS `finals[]` array.
+                    //
+                    // Non-final segments are merged into a single "seg-live"
+                    // event that always updates the same interim slot on the
+                    // JS side.  Without this, every tick produces a brand-new
+                    // id (because window_start_abs_ms shifts by ~1 s each
+                    // step), the old interim is orphaned, and the UI looks
+                    // like it is constantly deleting and restarting the text.
+                    let language = if cfg.language == "auto" {
+                        None
+                    } else {
+                        Some(cfg.language.clone())
+                    };
+
+                    let mut partial_texts: Vec<String> = Vec::new();
+
                     for seg in segments {
                         let abs_start = window_start_abs_ms + seg.start_ms;
                         let abs_end = window_start_abs_ms + seg.end_ms;
                         let id = format!("seg-{}", abs_start);
 
-                        // Already finalised on a previous pass — ignore.
                         if finalized.contains(&id) {
                             continue;
                         }
 
-                        // Promote to final if its end-time is fully behind
-                        // the *next* window — i.e. whisper won't see those
-                        // samples again, so the text won't change anymore.
                         let is_final = abs_end <= next_window_start_abs_ms;
-
                         let text = seg.text.trim().to_string();
                         if text.is_empty() {
                             continue;
                         }
 
-                        // Skip noisy re-emits when the partial text hasn't
-                        // changed since the last tick.
-                        if !is_final {
-                            if let Some(prev) = last_partial_text.get(&id) {
-                                if prev == &text {
-                                    continue;
-                                }
-                            }
-                            last_partial_text.insert(id.clone(), text.clone());
-                        } else {
+                        if is_final {
                             last_partial_text.remove(&id);
                             finalized.insert(id.clone());
-                        }
-
-                        let language = if cfg.language == "auto" {
-                            None
+                            let _ = app.emit(
+                                "voxnap://segment",
+                                EmittedSegment {
+                                    id,
+                                    text,
+                                    start_ms: abs_start,
+                                    end_ms: abs_end,
+                                    is_final: true,
+                                    confidence: seg.confidence,
+                                    language: language.clone(),
+                                },
+                            );
                         } else {
-                            Some(cfg.language.clone())
-                        };
-                        let _ = app.emit(
-                            "voxnap://segment",
-                            EmittedSegment {
-                                id,
-                                text,
-                                start_ms: abs_start,
-                                end_ms: abs_end,
-                                is_final,
-                                confidence: seg.confidence,
-                                language,
-                            },
-                        );
+                            partial_texts.push(text);
+                        }
+                    }
+
+                    // Emit all in-progress partial text as a single stable
+                    // "seg-live" event so the interim slot never flickers.
+                    if !partial_texts.is_empty() {
+                        let combined = partial_texts.join(" ");
+                        let changed = last_partial_text
+                            .get("seg-live")
+                            .map(|p| p != &combined)
+                            .unwrap_or(true);
+                        if changed {
+                            last_partial_text.insert("seg-live".to_string(), combined.clone());
+                            let window_end_abs_ms = window_start_abs_ms
+                                + (window_samples as i64 * 1000 / sr as i64);
+                            let _ = app.emit(
+                                "voxnap://segment",
+                                EmittedSegment {
+                                    id: "seg-live".to_string(),
+                                    text: combined,
+                                    start_ms: window_start_abs_ms,
+                                    end_ms: window_end_abs_ms,
+                                    is_final: false,
+                                    confidence: None,
+                                    language: language.clone(),
+                                },
+                            );
+                        }
                     }
 
                     // ── 4. Slide the window forward by `step_samples` ────
@@ -432,7 +479,7 @@ impl WhisperCtx {
         params.set_single_segment(false);
         params.set_translate(cfg.translate);
         params.set_suppress_blank(true);
-        params.set_suppress_non_speech_tokens(true);
+        params.set_suppress_nst(true);
         if cfg.language != "auto" {
             params.set_language(Some(&cfg.language));
         }
@@ -448,44 +495,52 @@ impl WhisperCtx {
             .full(params, samples)
             .map_err(|e| Error::Whisper(e.to_string()))?;
 
-        let n = state
-            .full_n_segments()
-            .map_err(|e| Error::Whisper(e.to_string()))?;
+        let n = state.full_n_segments();
         let mut out = Vec::with_capacity(n as usize);
         for i in 0..n {
-            let text = state
-                .full_get_segment_text(i)
-                .map_err(|e| Error::Whisper(e.to_string()))?;
-            // Whisper times are in 10 ms ticks.
-            let t0 = state
-                .full_get_segment_t0(i)
-                .map_err(|e| Error::Whisper(e.to_string()))?
-                * 10;
-            let t1 = state
-                .full_get_segment_t1(i)
-                .map_err(|e| Error::Whisper(e.to_string()))?
-                * 10;
+            let seg = match state.get_segment(i) {
+                Some(s) => s,
+                None => continue,
+            };
 
-            // Approx confidence from token probabilities (mean exp(prob)).
-            let confidence = (|| -> Option<f32> {
-                let n_tok = state.full_n_tokens(i).ok()?;
-                if n_tok <= 0 {
-                    return None;
-                }
+            // Whisper can split a multi-byte UTF-8 codepoint across the edge
+            // of a sliding window, which makes the strict `to_str` bail with
+            // `InvalidUtf8`. We fall back to the lossy variant so a single
+            // bad byte doesn't kill the whole inference pass.
+            let text = match seg.to_str() {
+                Ok(t) => t.to_string(),
+                Err(_) => match seg.to_str_lossy() {
+                    Ok(t) => t.into_owned(),
+                    Err(e) => {
+                        tracing::warn!("skipping segment {i}: {e}");
+                        continue;
+                    }
+                },
+            };
+
+            // Timestamps are in centiseconds (10 ms ticks) → convert to ms.
+            let t0 = seg.start_timestamp() * 10;
+            let t1 = seg.end_timestamp() * 10;
+
+            // Approx confidence from token probabilities (mean p).
+            let n_tok = seg.n_tokens();
+            let confidence = if n_tok > 0 {
                 let mut sum = 0.0f32;
                 let mut count = 0i32;
                 for tok in 0..n_tok {
-                    if let Ok(td) = state.full_get_token_data(i, tok) {
-                        sum += td.p;
+                    if let Some(t) = seg.get_token(tok) {
+                        sum += t.token_data().p;
                         count += 1;
                     }
                 }
-                if count == 0 {
-                    None
-                } else {
+                if count > 0 {
                     Some((sum / count as f32).clamp(0.0, 1.0))
+                } else {
+                    None
                 }
-            })();
+            } else {
+                None
+            };
 
             out.push(RawSegment {
                 text,

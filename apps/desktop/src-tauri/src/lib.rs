@@ -33,6 +33,7 @@
 mod audio;
 mod commands;
 mod error;
+mod models;
 mod state;
 mod whisper;
 
@@ -60,6 +61,11 @@ pub fn run() {
             commands::voxnap_stop,
             commands::voxnap_dispose,
             commands::voxnap_list_devices,
+            commands::voxnap_list_models,
+            commands::voxnap_models_dir,
+            commands::voxnap_download_model,
+            commands::voxnap_cancel_download,
+            commands::voxnap_delete_model,
         ])
         .setup(|app| {
             tracing::info!(

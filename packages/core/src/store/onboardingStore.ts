@@ -48,6 +48,10 @@ export interface OnboardingChoices {
   /** ISO 639-1 code or "auto". */
   language: string;
   translateToEnglish: boolean;
+  /** VAD RMS threshold passed to the engine. 0.0 means always-run. Default 0.012. */
+  vadThreshold: number;
+  /** Whether energy-based VAD is enabled. Default true. */
+  vadEnabled: boolean;
   aiProvider: AiProvider;
   /** Stored locally only when the chosen provider needs a key. */
   aiApiKey: string;
@@ -74,6 +78,8 @@ export interface OnboardingState extends OnboardingChoices {
   setModelId: (id: WhisperModelId) => void;
   setLanguage: (lang: string) => void;
   setTranslateToEnglish: (v: boolean) => void;
+  setVadThreshold: (v: number) => void;
+  setVadEnabled: (v: boolean) => void;
   setAiProvider: (p: AiProvider) => void;
   setAiApiKey: (key: string) => void;
   setSummaryLength: (l: SummaryLength) => void;
@@ -93,6 +99,8 @@ const DEFAULTS: OnboardingChoices & {
   modelId: DEFAULT_MODEL,
   language: "auto",
   translateToEnglish: false,
+  vadThreshold: 0.012,
+  vadEnabled: true,
   aiProvider: "mock",
   aiApiKey: "",
   summaryLength: "medium",
@@ -146,6 +154,8 @@ function writeState(snapshot: Partial<OnboardingState>): void {
       modelId,
       language,
       translateToEnglish,
+      vadThreshold,
+      vadEnabled,
       aiProvider,
       aiApiKey,
       summaryLength,
@@ -161,6 +171,8 @@ function writeState(snapshot: Partial<OnboardingState>): void {
         modelId,
         language,
         translateToEnglish,
+        vadThreshold,
+        vadEnabled,
         aiProvider,
         aiApiKey,
         summaryLength,
@@ -252,6 +264,16 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => {
     setAiApiKey: (aiApiKey) =>
       persistAfter(() => {
         set({ aiApiKey });
+      }),
+
+    setVadThreshold: (vadThreshold) =>
+      persistAfter(() => {
+        set({ vadThreshold });
+      }),
+
+    setVadEnabled: (vadEnabled) =>
+      persistAfter(() => {
+        set({ vadEnabled });
       }),
 
     setSummaryLength: (summaryLength) =>

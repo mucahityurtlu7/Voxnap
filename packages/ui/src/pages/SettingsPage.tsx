@@ -19,6 +19,7 @@ import {
   AI_PROVIDERS,
   WHISPER_MODELS,
   useAiStore,
+  useOnboardingStore,
   type AiProvider,
   type SummaryLength,
   type WhisperModelId,
@@ -31,6 +32,7 @@ import { Select } from "../components/ui/Select.js";
 import { Badge } from "../components/ui/Badge.js";
 import { Button } from "../components/ui/Button.js";
 import { Kbd } from "../components/ui/Kbd.js";
+import { ModelManagerPanel } from "../components/ModelManagerPanel.js";
 import { useTheme, type ThemeMode } from "../hooks/useTheme.js";
 import { formatShortcut } from "../hooks/useShortcuts.js";
 import { useOnboarding } from "../hooks/useOnboarding.js";
@@ -61,6 +63,9 @@ export interface SettingsPageProps {
   onModelChange: (id: WhisperModelId) => void;
   language: string;
   onLanguageChange: (lang: string) => void;
+  /** Whisper translate-to-English toggle. */
+  translate?: boolean;
+  onTranslateChange?: (v: boolean) => void;
 }
 
 export function SettingsPage({
@@ -68,6 +73,8 @@ export function SettingsPage({
   onModelChange,
   language,
   onLanguageChange,
+  translate = false,
+  onTranslateChange,
 }: SettingsPageProps) {
   const [active, setActive] = useState<(typeof SECTIONS)[number]["id"]>("audio");
 
@@ -131,6 +138,8 @@ export function SettingsPage({
             onModelChange={onModelChange}
             language={language}
             onLanguageChange={onLanguageChange}
+            translate={translate}
+            onTranslateChange={onTranslateChange}
           />
         )}
         {active === "ai" && <AiSection />}
@@ -185,26 +194,35 @@ function Field({
 }
 
 function AudioSection() {
-  const [vad, setVad] = useState(0.4);
+  const vadThreshold = useOnboardingStore((s) => s.vadThreshold);
+  const setVadThreshold = useOnboardingStore((s) => s.setVadThreshold);
+  const vadEnabled = useOnboardingStore((s) => s.vadEnabled);
+  const setVadEnabled = useOnboardingStore((s) => s.setVadEnabled);
   const [gain, setGain] = useState(0);
-  const [autoStop, setAutoStop] = useState(false);
 
   return (
     <Section
       title="Audio"
       description="How Voxnap captures and pre-processes microphone input."
     >
+      <Toggle
+        checked={vadEnabled}
+        onChange={setVadEnabled}
+        label="Voice activity detection (VAD)"
+        description="Skip inference on silent windows to save CPU and prevent hallucinations."
+      />
+
       <Field
-        label="VAD threshold"
-        description="Higher values reject more background noise. Default 0.4."
+        label="VAD sensitivity"
+        description={`RMS energy threshold. Lower = more sensitive. Current: ${vadThreshold.toFixed(3)}`}
       >
         <Slider
           min={0}
-          max={1}
-          step={0.05}
-          value={vad}
-          onChange={(e) => setVad(Number(e.currentTarget.value))}
-          formatValue={(n) => n.toFixed(2)}
+          max={0.1}
+          step={0.001}
+          value={vadThreshold}
+          onChange={(e) => setVadThreshold(Number(e.currentTarget.value))}
+          formatValue={(n) => n.toFixed(3)}
         />
       </Field>
 
@@ -221,13 +239,6 @@ function AudioSection() {
           unit=" dB"
         />
       </Field>
-
-      <Toggle
-        checked={autoStop}
-        onChange={setAutoStop}
-        label="Auto-stop on long silence"
-        description="Stop recording after 30 seconds of detected silence."
-      />
     </Section>
   );
 }
@@ -237,20 +248,36 @@ function ModelSection({
   onModelChange,
   language,
   onLanguageChange,
+  translate,
+  onTranslateChange,
 }: {
   modelId: WhisperModelId;
   onModelChange: (id: WhisperModelId) => void;
   language: string;
   onLanguageChange: (lang: string) => void;
+  translate: boolean;
+  onTranslateChange?: (v: boolean) => void;
 }) {
-  const [translate, setTranslate] = useState(false);
   const [threads, setThreads] = useState(4);
   return (
     <Section
       title="Model"
-      description="Whisper.cpp model used for transcription."
+      description="Whisper.cpp model used for transcription. Download new models or remove ones you don't need."
     >
-      <Field label="Whisper model">
+      <Field
+        label="Whisper model"
+        description="Pick the active model and manage what's installed on this device."
+      >
+        <ModelManagerPanel
+          selectedModelId={modelId}
+          onSelect={onModelChange}
+        />
+      </Field>
+
+      <Field
+        label="Quick switch"
+        description="Same selection, plain dropdown. Handy when you've already downloaded several models."
+      >
         <Select value={modelId} onChange={(e) => onModelChange(e.target.value as WhisperModelId)}>
           {Object.values(WHISPER_MODELS).map((m) => (
             <option key={m.id} value={m.id}>
@@ -286,7 +313,7 @@ function ModelSection({
 
       <Toggle
         checked={translate}
-        onChange={setTranslate}
+        onChange={(v) => onTranslateChange?.(v)}
         label="Translate to English"
         description="Whisper translates the spoken language to English on the fly."
       />

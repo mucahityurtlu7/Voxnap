@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::audio::{self, AudioDeviceInfo};
 use crate::error::{Error, Result};
+use crate::models::{self, ModelInfo};
 use crate::state::{AppState, Session};
 use crate::whisper::{self, WhisperConfig};
 
@@ -170,4 +171,45 @@ pub async fn voxnap_dispose(app: AppHandle, state: State<'_, AppState>) -> Resul
 #[tauri::command]
 pub fn voxnap_list_devices() -> Result<Vec<AudioDeviceInfo>> {
     audio::list_devices()
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Model management
+// ────────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn voxnap_list_models(app: AppHandle) -> Vec<ModelInfo> {
+    models::list_models(&app)
+}
+
+#[tauri::command]
+pub fn voxnap_models_dir(app: AppHandle) -> Result<String> {
+    let dir = models::writable_models_dir(&app)?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn voxnap_download_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    #[allow(non_snake_case)] modelId: String,
+) -> Result<()> {
+    let registry = state.downloads.clone();
+    models::download_model(app, registry, modelId).await
+}
+
+#[tauri::command]
+pub async fn voxnap_cancel_download(
+    state: State<'_, AppState>,
+    #[allow(non_snake_case)] modelId: String,
+) -> Result<bool> {
+    Ok(models::cancel_download(&state.downloads, &modelId).await)
+}
+
+#[tauri::command]
+pub async fn voxnap_delete_model(
+    app: AppHandle,
+    #[allow(non_snake_case)] modelId: String,
+) -> Result<()> {
+    models::delete_model(&app, &modelId).await
 }

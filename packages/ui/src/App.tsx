@@ -6,10 +6,11 @@
  * Apps inject the engine + summariser + session store via providers
  * around <App /> in their main.tsx, so the shell stays platform-agnostic.
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Route, Routes, BrowserRouter, HashRouter } from "react-router-dom";
 import {
   DEFAULT_MODEL,
+  useOnboardingStore,
   useTranscriptionStore,
   type WhisperModelId,
 } from "@voxnap/core";
@@ -51,23 +52,66 @@ export function App({ router = "browser" }: AppProps) {
 function Shell() {
   const onboarding = useOnboarding();
 
-  const [modelId, setModelId] = useState<WhisperModelId>(
+  const [modelId, setModelIdLocal] = useState<WhisperModelId>(
     onboarding.choices.modelId ?? DEFAULT_MODEL,
   );
-  const [language, setLanguage] = useState<string>(
+  const [language, setLanguageLocal] = useState<string>(
     onboarding.choices.language ?? "auto",
+  );
+  const [translate, setTranslateLocal] = useState<boolean>(
+    onboarding.choices.translateToEnglish ?? false,
+  );
+  const [vadThreshold, setVadThresholdLocal] = useState<number>(
+    onboarding.choices.vadThreshold ?? 0.012,
+  );
+  const [vadEnabled, setVadEnabledLocal] = useState<boolean>(
+    onboarding.choices.vadEnabled ?? true,
   );
   const engine = useEngine();
   const engineState = useTranscriptionStore((s) => s.engineState);
+
+  // Persist user's runtime model/language/translate choices back into the
+  // onboarding store so the picks survive across reloads and the engine
+  // re-init effect in <LiveTranscribePage /> picks them up consistently.
+  const setModelId = useCallback((id: WhisperModelId) => {
+    setModelIdLocal(id);
+    useOnboardingStore.getState().setModelId(id);
+  }, []);
+  const setLanguage = useCallback((lang: string) => {
+    setLanguageLocal(lang);
+    useOnboardingStore.getState().setLanguage(lang);
+  }, []);
+  const setTranslate = useCallback((v: boolean) => {
+    setTranslateLocal(v);
+    useOnboardingStore.getState().setTranslateToEnglish(v);
+  }, []);
+  const setVadThreshold = useCallback((v: number) => {
+    setVadThresholdLocal(v);
+    useOnboardingStore.getState().setVadThreshold(v);
+  }, []);
+  const setVadEnabled = useCallback((v: boolean) => {
+    setVadEnabledLocal(v);
+    useOnboardingStore.getState().setVadEnabled(v);
+  }, []);
 
   // Once the user finishes onboarding, hydrate the live config with their
   // picks so the first recording uses the model + language they chose.
   useEffect(() => {
     if (onboarding.completed) {
-      setModelId(onboarding.choices.modelId);
-      setLanguage(onboarding.choices.language);
+      setModelIdLocal(onboarding.choices.modelId);
+      setLanguageLocal(onboarding.choices.language);
+      setTranslateLocal(onboarding.choices.translateToEnglish);
+      setVadThresholdLocal(onboarding.choices.vadThreshold);
+      setVadEnabledLocal(onboarding.choices.vadEnabled);
     }
-  }, [onboarding.completed, onboarding.choices.modelId, onboarding.choices.language]);
+  }, [
+    onboarding.completed,
+    onboarding.choices.modelId,
+    onboarding.choices.language,
+    onboarding.choices.translateToEnglish,
+    onboarding.choices.vadThreshold,
+    onboarding.choices.vadEnabled,
+  ]);
 
   // Until the user has finished the welcome wizard, render it instead of
   // the regular AppShell. This keeps the first-run experience focused and
@@ -91,7 +135,18 @@ function Shell() {
       onToggleRecording={onToggleRecording}
     >
       <Routes>
-        <Route path="/" element={<LiveTranscribePage modelId={modelId} language={language} />} />
+        <Route
+          path="/"
+          element={
+            <LiveTranscribePage
+              modelId={modelId}
+              language={language}
+              translate={translate}
+              vadThreshold={vadThreshold}
+              vadEnabled={vadEnabled}
+            />
+          }
+        />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/sessions/:id" element={<SessionDetailPage />} />
         <Route path="/summaries" element={<SummariesPage />} />
@@ -104,6 +159,8 @@ function Shell() {
               onModelChange={setModelId}
               language={language}
               onLanguageChange={setLanguage}
+              translate={translate}
+              onTranslateChange={setTranslate}
             />
           }
         />

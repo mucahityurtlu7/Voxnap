@@ -13,6 +13,7 @@
     "./store": "./src/store/index.ts",
     "./ai": "./src/ai/index.ts",
     "./sessions": "./src/sessions/index.ts",
+    "./models": "./src/models/index.ts",
     "./types": "./src/types.ts"
   },
   "scripts": {
