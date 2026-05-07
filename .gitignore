@@ -21,6 +21,8 @@ target/
 **/public/whisper/*.bin
 **/public/whisper/*.gguf
 models/
+# But DO track the source-code models package
+!packages/core/src/models/
 *.ggml
 ggml-*.bin
 
