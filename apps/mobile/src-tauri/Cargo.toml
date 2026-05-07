@@ -12,10 +12,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "voxnap_mobile_lib"
 
 [build-dependencies]
-tauri-build = { version = "2.0.1", features = [] }
+tauri-build = { version = "2.11", features = [] }
 
 [dependencies]
-tauri = { version = "2.0.4", features = [] }
+tauri = { version = "2.11", features = [] }
 
 # Re-export the entire desktop pipeline. The desktop crate already exposes
 # `pub fn run()` and all its modules — the mobile binary just calls it.
@@ -27,4 +27,4 @@ log = "0.4"
 
 # Tauri's mobile target hides the entry-point behind a macro.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
-tauri = { version = "2.0.4", features = [] }
+tauri = { version = "2.11", features = [] }
