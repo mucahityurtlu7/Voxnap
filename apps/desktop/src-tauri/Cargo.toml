@@ -15,16 +15,16 @@ name = "voxnap_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.11", features = [] }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2.11", features = [] }
-tauri-plugin-dialog = "2.11"
-tauri-plugin-fs = "2.11"
-tauri-plugin-log = "2.11"
-tauri-plugin-os = "2.11"
-tauri-plugin-shell = "2.11"
-tauri-plugin-store = "2.11"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-log = "2"
+tauri-plugin-os = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-store = "2"
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -102,4 +102,4 @@ whisper-rs = { version = "0.16", default-features = false, features = ["coreml"]
 # Tauri's mobile target needs special handling; this profile is also used
 # from `apps/mobile/src-tauri`.
 [target."cfg(any(target_os = \"android\", target_os = \"ios\"))".dependencies]
-tauri = { version = "2.11", features = [] }
+tauri = { version = "2", features = [] }
