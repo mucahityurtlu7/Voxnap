@@ -24,6 +24,7 @@
     "test": "pnpm -r --parallel test",
     "fmt": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,css}\" --ignore-path .gitignore",
 "fetch:model": "node scripts/fetch-model.mjs base.q5_1",
+    "fetch:onnx-model": "node scripts/fetch-onnx-model.mjs base.en",
     "clean": "pnpm -r exec rimraf dist build node_modules .turbo",
     "graph:install": "node scripts/install-graphify.mjs",
     "graph": "graphify extract .",

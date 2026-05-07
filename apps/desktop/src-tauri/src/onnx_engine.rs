@@ -191,9 +191,15 @@ pub fn resolve_model_dir(app: &AppHandle, cfg: &OnnxConfig) -> Result<PathBuf> {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Loaded ORT sessions for one Whisper model.
+///
+/// `decoder_with_past` is **optional**: when present, `transcribe()`
+/// switches to KV-cache reuse (O(n) decode steps); when absent it falls
+/// back to the O(n²) re-feed path so smoke-testing still works on
+/// minimal model bundles.
 pub struct OnnxWhisperEngine {
     pub encoder: ort::session::Session,
     pub decoder: ort::session::Session,
+    pub decoder_with_past: Option<ort::session::Session>,
     pub tokenizer: WhisperTokenizer,
     pub model_dir: PathBuf,
     pub active_ep: String,
@@ -217,6 +223,7 @@ impl OnnxWhisperEngine {
                 )));
             }
         }
+        let decoder_kv_path = dir.join("decoder_with_past.onnx");
 
         tracing::info!(
             backend = cfg.compute_backend.as_deref().unwrap_or("auto"),
@@ -255,6 +262,21 @@ impl OnnxWhisperEngine {
         let mut active_ep = String::new();
         let encoder = make_session(&encoder_path, &mut active_ep)?;
         let decoder = make_session(&decoder_path, &mut active_ep)?;
+        // KV-cache graph is optional. When the bundle ships it we get an
+        // order-of-magnitude speed-up because the decoder re-uses past
+        // attention keys/values instead of recomputing them every step.
+        let decoder_with_past = if decoder_kv_path.is_file() {
+            tracing::info!(
+                path = %decoder_kv_path.display(),
+                "found decoder_with_past.onnx — KV-cache reuse enabled"
+            );
+            Some(make_session(&decoder_kv_path, &mut active_ep)?)
+        } else {
+            tracing::info!(
+                "no decoder_with_past.onnx — falling back to O(n²) decode (still works, just slower)"
+            );
+            None
+        };
         if active_ep.is_empty() {
             active_ep = "cpu".into();
         }
@@ -265,6 +287,7 @@ impl OnnxWhisperEngine {
         Ok(Self {
             encoder,
             decoder,
+            decoder_with_past,
             tokenizer,
             model_dir: dir,
             active_ep,
@@ -279,11 +302,22 @@ impl OnnxWhisperEngine {
 
     /// Transcribe a single 16 kHz mono PCM utterance into text.
     ///
-    /// Greedy decoding, no beam search, no timestamps. Intentionally
-    /// simple so the wiring is auditable end-to-end. Phase 2B replaces
-    /// the inner loop with `decoder_with_past.onnx` (KV cache reuse) so
-    /// throughput is O(n) instead of O(n²); Phase 2C adds beam search +
-    /// timestamps for word-level timing.
+    /// Greedy decoding, no beam search, no timestamps. Two code paths:
+    ///
+    ///  • **KV-cache reuse** (when `decoder_with_past.onnx` is loaded):
+    ///    The first call to `decoder.onnx` produces both the initial
+    ///    logits *and* the per-layer attention KV outputs. Subsequent
+    ///    calls go to `decoder_with_past.onnx`, which expects only the
+    ///    newest token plus the past KV; total work is O(n) tokens.
+    ///
+    ///  • **Re-feed fallback** (when the KV graph is missing): every
+    ///    step re-runs the full prefix through `decoder.onnx`. O(n²)
+    ///    but keeps Phase 2A smoke-tests working on minimal bundles.
+    ///
+    /// The exported graph names KV outputs `present.<L>.<{encoder,decoder}>.{key,value}`
+    /// and KV inputs `past_key_values.<L>.<{encoder,decoder}>.{key,value}`.
+    /// We rebuild the next-step input map by string-replacing the prefix.
+    /// Phase 2C will add beam search + timestamps for word-level timing.
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
         // 1) Features.
         let mel_arr = mel::log_mel_spectrogram(samples); // (80, 3000)
@@ -296,8 +330,6 @@ impl OnnxWhisperEngine {
             .encoder
             .run(ort::inputs![mel_tensor])
             .map_err(|e| Error::Other(format!("encoder.run: {e}")))?;
-        // Recent HF exports name the output `encoder_hidden_states`;
-        // older ones used `last_hidden_state`. Try both.
         let encoder_states_array = encoder_outputs
             .get("encoder_hidden_states")
             .or_else(|| encoder_outputs.get("last_hidden_state"))
@@ -305,62 +337,216 @@ impl OnnxWhisperEngine {
             .try_extract_array::<f32>()
             .map_err(|e| Error::Other(format!("encoder output extract: {e}")))?
             .into_owned();
-        // Shape into (1, 1500, d_model) — try_extract_array gives us the
-        // raw shape from ONNX so this is already 3-D, just rebound.
         let encoder_states: Array3<f32> = encoder_states_array
             .into_dimensionality()
             .map_err(|e| Error::Other(format!("encoder shape: {e}")))?;
 
         // 3) Decoder prefix.
         let prefix = self.tokenizer.sot_prefix(&self.language, self.translate);
-        let mut input_ids: Vec<i64> = prefix.iter().map(|&t| t as i64).collect();
+        let prefix_ids: Vec<i64> = prefix.iter().map(|&t| t as i64).collect();
 
-        // 4) Greedy autoregressive loop.
         const MAX_DECODE_STEPS: usize = 224;
         let mut emitted: Vec<u32> = Vec::with_capacity(MAX_DECODE_STEPS);
 
-        for _ in 0..MAX_DECODE_STEPS {
-            let ids_arr = Array2::<i64>::from_shape_vec(
-                (1, input_ids.len()),
-                input_ids.clone(),
-            )
-            .map_err(|e| Error::Other(format!("decoder ids shape: {e}")))?;
+        // We split the `&mut self` here into disjoint fields so the
+        // borrow checker lets us pass `decoder` and `decoder_with_past`
+        // as two distinct `&mut Session` handles into the helpers.
+        let Self {
+            decoder,
+            decoder_with_past,
+            tokenizer,
+            ..
+        } = self;
 
-            let ids_tensor = TensorRef::from_array_view(&ids_arr)
-                .map_err(|e| Error::Other(format!("ids tensor: {e}")))?;
-            let enc_tensor = TensorRef::from_array_view(&encoder_states)
-                .map_err(|e| Error::Other(format!("encoder tensor: {e}")))?;
-
-            let outputs = self
-                .decoder
-                .run(ort::inputs![
-                    "input_ids" => ids_tensor,
-                    "encoder_hidden_states" => enc_tensor,
-                ])
-                .map_err(|e| Error::Other(format!("decoder.run: {e}")))?;
-
-            let logits = outputs
-                .get("logits")
-                .ok_or_else(|| Error::Other("decoder did not emit logits".into()))?
-                .try_extract_array::<f32>()
-                .map_err(|e| Error::Other(format!("logits extract: {e}")))?
-                .into_owned();
-            // Logits are (1, T, vocab); take the last position's row.
-            let logits3: Array3<f32> = logits
-                .into_dimensionality()
-                .map_err(|e| Error::Other(format!("logits shape: {e}")))?;
-            let last = logits3.index_axis(Axis(1), logits3.shape()[1] - 1);
-            let next_id = argmax_u32(&last.to_owned().into_dimensionality::<ndarray::Ix1>().unwrap());
-
-            if self.tokenizer.is_terminal(next_id) {
-                break;
-            }
-            emitted.push(next_id);
-            input_ids.push(next_id as i64);
+        if let Some(kv_decoder) = decoder_with_past.as_mut() {
+            decode_with_kv_cache(
+                decoder,
+                kv_decoder,
+                tokenizer,
+                &encoder_states,
+                prefix_ids,
+                MAX_DECODE_STEPS,
+                &mut emitted,
+            )?;
+        } else {
+            decode_refeed(
+                decoder,
+                tokenizer,
+                &encoder_states,
+                prefix_ids,
+                MAX_DECODE_STEPS,
+                &mut emitted,
+            )?;
         }
 
-        self.tokenizer.decode(&emitted)
+        tokenizer.decode(&emitted)
     }
+}
+
+/// O(n²) fallback: re-feeds the full prefix through `decoder.onnx`
+/// every step. Used when `decoder_with_past.onnx` isn't available.
+fn decode_refeed(
+    decoder: &mut ort::session::Session,
+    tokenizer: &WhisperTokenizer,
+    encoder_states: &Array3<f32>,
+    mut input_ids: Vec<i64>,
+    max_steps: usize,
+    emitted: &mut Vec<u32>,
+) -> Result<()> {
+    for _ in 0..max_steps {
+        let ids_arr = Array2::<i64>::from_shape_vec((1, input_ids.len()), input_ids.clone())
+            .map_err(|e| Error::Other(format!("decoder ids shape: {e}")))?;
+        let ids_tensor = TensorRef::from_array_view(&ids_arr)
+            .map_err(|e| Error::Other(format!("ids tensor: {e}")))?;
+        let enc_tensor = TensorRef::from_array_view(encoder_states)
+            .map_err(|e| Error::Other(format!("encoder tensor: {e}")))?;
+
+        let outputs = decoder
+            .run(ort::inputs![
+                "input_ids" => ids_tensor,
+                "encoder_hidden_states" => enc_tensor,
+            ])
+            .map_err(|e| Error::Other(format!("decoder.run: {e}")))?;
+
+        let next_id = pick_next_token(&outputs)?;
+        if tokenizer.is_terminal(next_id) {
+            break;
+        }
+        emitted.push(next_id);
+        input_ids.push(next_id as i64);
+    }
+    Ok(())
+}
+
+/// O(n) fast path: uses `decoder.onnx` once for the prefix to seed
+/// the KV cache, then loops on `decoder_with_past.onnx` feeding only
+/// the newest token + the cached attention keys/values per layer.
+fn decode_with_kv_cache(
+    decoder: &mut ort::session::Session,
+    kv_decoder: &mut ort::session::Session,
+    tokenizer: &WhisperTokenizer,
+    encoder_states: &Array3<f32>,
+    prefix_ids: Vec<i64>,
+    max_steps: usize,
+    emitted: &mut Vec<u32>,
+) -> Result<()> {
+    // ── Initial pass: seeds the KV cache.
+    let prefix_arr = Array2::<i64>::from_shape_vec((1, prefix_ids.len()), prefix_ids.clone())
+        .map_err(|e| Error::Other(format!("decoder prefix shape: {e}")))?;
+    let prefix_tensor = TensorRef::from_array_view(&prefix_arr)
+        .map_err(|e| Error::Other(format!("prefix tensor: {e}")))?;
+    let enc_tensor = TensorRef::from_array_view(encoder_states)
+        .map_err(|e| Error::Other(format!("encoder tensor: {e}")))?;
+
+    let initial_outputs = decoder
+        .run(ort::inputs![
+            "input_ids" => prefix_tensor,
+            "encoder_hidden_states" => enc_tensor,
+        ])
+        .map_err(|e| Error::Other(format!("decoder.run (initial): {e}")))?;
+
+    let mut next_id = pick_next_token(&initial_outputs)?;
+    if tokenizer.is_terminal(next_id) {
+        return Ok(());
+    }
+    emitted.push(next_id);
+
+    // Drain "present.*" tensors out of the initial outputs into a
+    // map keyed by their "past_key_values.*" rename.
+    let mut past_kv: Vec<(String, ndarray::ArrayD<f32>)> = Vec::new();
+    for (name, value) in initial_outputs.iter() {
+        if let Some(stripped) = name.strip_prefix("present") {
+            let arr = value
+                .try_extract_array::<f32>()
+                .map_err(|e| Error::Other(format!("present extract {name}: {e}")))?
+                .into_owned();
+            past_kv.push((format!("past_key_values{stripped}"), arr));
+        }
+    }
+    if past_kv.is_empty() {
+        return Err(Error::Other(
+            "decoder.onnx did not emit any `present.*` outputs (KV cache unavailable)".into(),
+        ));
+    }
+
+    for _ in 0..max_steps - 1 {
+            // Build the next-step input: one new token + every past KV.
+            let single_input = Array2::<i64>::from_shape_vec((1, 1), vec![next_id as i64])
+                .map_err(|e| Error::Other(format!("decoder step shape: {e}")))?;
+
+            // Stash tensor refs in vecs so they outlive the inputs! call.
+            let mut kv_refs: Vec<(String, TensorRef<'_, f32>)> = Vec::with_capacity(past_kv.len());
+            for (name, arr) in past_kv.iter() {
+                let t = TensorRef::from_array_view(arr)
+                    .map_err(|e| Error::Other(format!("past_kv tensor {name}: {e}")))?;
+                kv_refs.push((name.clone(), t));
+            }
+            let single_tensor = TensorRef::from_array_view(&single_input)
+                .map_err(|e| Error::Other(format!("step ids tensor: {e}")))?;
+            let enc_tensor = TensorRef::from_array_view(encoder_states)
+                .map_err(|e| Error::Other(format!("step encoder tensor: {e}")))?;
+
+            // Build the heterogeneous SessionInputs map. We use the Vec
+            // variant because the number of past_kv entries is dynamic
+            // (depends on the model's layer count).
+            let mut inputs: Vec<(std::borrow::Cow<'_, str>, ort::session::SessionInputValue<'_>)> =
+                Vec::with_capacity(2 + kv_refs.len());
+            inputs.push((
+                "input_ids".into(),
+                ort::session::SessionInputValue::from(single_tensor),
+            ));
+            inputs.push((
+                "encoder_hidden_states".into(),
+                ort::session::SessionInputValue::from(enc_tensor),
+            ));
+            for (name, t) in kv_refs.into_iter() {
+                inputs.push((
+                    std::borrow::Cow::Owned(name),
+                    ort::session::SessionInputValue::from(t),
+                ));
+            }
+
+            let outputs = kv_decoder
+                .run(inputs)
+                .map_err(|e| Error::Other(format!("decoder_with_past.run: {e}")))?;
+
+        next_id = pick_next_token(&outputs)?;
+        if tokenizer.is_terminal(next_id) {
+            break;
+        }
+        emitted.push(next_id);
+
+        // Roll the KV cache forward for the next step.
+        past_kv.clear();
+        for (name, value) in outputs.iter() {
+            if let Some(stripped) = name.strip_prefix("present") {
+                let arr = value
+                    .try_extract_array::<f32>()
+                    .map_err(|e| Error::Other(format!("present extract {name}: {e}")))?
+                    .into_owned();
+                past_kv.push((format!("past_key_values{stripped}"), arr));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Argmax the last position of a `(1, T, vocab)` logits tensor.
+fn pick_next_token(outputs: &ort::session::SessionOutputs) -> Result<u32> {
+    let logits = outputs
+        .get("logits")
+        .ok_or_else(|| Error::Other("decoder did not emit logits".into()))?
+        .try_extract_array::<f32>()
+        .map_err(|e| Error::Other(format!("logits extract: {e}")))?
+        .into_owned();
+    let logits3: Array3<f32> = logits
+        .into_dimensionality()
+        .map_err(|e| Error::Other(format!("logits shape: {e}")))?;
+    let t = logits3.shape()[1];
+    let last = logits3.index_axis(Axis(1), t - 1);
+    Ok(argmax_u32(
+        &last.to_owned().into_dimensionality::<ndarray::Ix1>().unwrap(),
+    ))
 }
 
 /// Argmax over a 1-D tensor of f32. Returns the index as u32 (token id type).
