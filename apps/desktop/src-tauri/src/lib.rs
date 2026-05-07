@@ -35,6 +35,7 @@ mod audio;
 mod commands;
 mod error;
 mod models;
+mod onnx_engine;
 mod state;
 mod whisper;
 

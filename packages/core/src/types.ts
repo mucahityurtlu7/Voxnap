@@ -126,22 +126,41 @@ export interface AcceleratorInfo {
   /** Vendor string when known, e.g. "Apple", "NVIDIA", "Intel", "Qualcomm". */
   vendor?: string;
   /**
-   * whisper.cpp backend identifier this accelerator maps to:
-   * `"coreml" | "metal" | "cuda" | "vulkan" | "openvino" | "qnn" | "cpu"`.
+   * Backend identifier this accelerator maps to:
+   * `"coreml" | "metal" | "cuda" | "vulkan" | "openvino" | "qnn" |
+   *  "directml" | "xdna" | "cpu"`.
+   *
+   * The first set (`coreml | metal | cuda | cpu`) is served by the
+   * whisper.cpp pipeline; `openvino | qnn | directml` are served by the
+   * ONNX Runtime pipeline (`OnnxWhisperEngine`). `xdna` is reported as
+   * detected-but-unavailable today (no production-grade ORT EP yet).
    * Purely informational — the engine itself decides what to wire up.
    */
   backend: string;
   /**
+   * Which inference pipeline owns this accelerator:
+   *   • `"whisper-cpp"` — `whisper-rs` (`WhisperCtx`)
+   *   • `"onnx"`        — `ort` (`OnnxWhisperEngine`)
+   *   • `"cpu"`         — always-on fallback
+   *
+   * The Tauri engine uses this to dispatch to the right Rust pipeline
+   * when the user pins a specific backend. Optional so older Rust builds
+   * (pre-Phase 1) that don't emit it still parse cleanly.
+   */
+  provider?: "whisper-cpp" | "onnx" | "cpu";
+  /**
    * `true` if this accelerator is actually usable by the current binary.
    * Detection may notice an NPU on the host but the build may have been
-   * compiled without the matching whisper.cpp feature flag — in which
-   * case `available` is `false` and `unavailableReason` explains why.
+   * compiled without the matching cargo feature, OR the EP's runtime
+   * libraries (DirectML.dll, openvino.dll, libQnnHtp.so, …) may be
+   * missing — in either case `available` is `false` and
+   * `unavailableReason` explains exactly which.
    */
   available: boolean;
   /**
    * Human-readable reason this accelerator is greyed out in the UI, e.g.
-   * "Build the desktop app with the `coreml` cargo feature to enable
-   *  Apple Neural Engine acceleration."
+   * "Rebuild Voxnap with `--features ort-openvino` and install the
+   *  OpenVINO runtime to enable Intel NPU."
    */
   unavailableReason?: string;
 }

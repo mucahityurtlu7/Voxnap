@@ -145,6 +145,7 @@ export function ComputeBackendPicker({
               onSelect={() => onChange(a.id)}
               disabled={disabled}
               vendor={a.vendor}
+              unavailableReason={a.unavailableReason}
             />
           );
         })}
@@ -164,6 +165,11 @@ interface BackendRowProps {
   /** When true, draw an extra "detected" rosette (used on the Auto row). */
   highlight?: boolean;
   vendor?: string;
+  /**
+   * Raw `unavailableReason` from the engine. Drives the "Not bundled" vs
+   * "Unavailable" badge split — see the badge block below for the rule.
+   */
+  unavailableReason?: string;
 }
 
 function BackendRow({
@@ -176,6 +182,7 @@ function BackendRow({
   disabled,
   highlight,
   vendor,
+  unavailableReason,
 }: BackendRowProps) {
   const Icon = ICON_FOR[id];
   return (
@@ -230,8 +237,25 @@ function BackendRow({
             </Badge>
           )}
           {!available && id !== "auto" && (
-            <Badge tone="warning" size="sm" icon={<AlertTriangle className="h-2.5 w-2.5" />}>
-              Not bundled
+            <Badge
+              tone="warning"
+              size="sm"
+              icon={<AlertTriangle className="h-2.5 w-2.5" />}
+              title={
+                unavailableReason ??
+                "This accelerator wasn't compiled into the current Voxnap build."
+              }
+            >
+              {/*
+               * Differentiate "not compiled in" from "compiled but the
+               * runtime libraries / hardware aren't ready". Both end up
+               * with `available: false`, but the user-facing fix is very
+               * different (rebuild vs install vendor SDK), and the full
+               * reason already shows up in the row description below.
+               */}
+              {unavailableReason?.startsWith("Rebuild")
+                ? "Not bundled"
+                : "Unavailable"}
             </Badge>
           )}
           {vendor && id !== "auto" && (

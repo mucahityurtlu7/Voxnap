@@ -47,10 +47,21 @@ ringbuf = "0.4"
 # per platform via Cargo features (see `[features]` below).
 whisper-rs = { version = "0.16", default-features = false }
 
+# ONNX Runtime bindings — used by the parallel `onnx_engine` pipeline that
+# targets NPU/GPU execution providers (DirectML on Windows, CoreML on Apple,
+# QNN for Qualcomm Hexagon, OpenVINO for Intel, …). The `download-binaries`
+# feature ships pre-built ORT 1.24 dylibs alongside the binary so users
+# don't need a separate ORT install. EPs themselves still need their
+# vendor-supplied DLLs at runtime; ort returns "EP not registered" if they
+# are missing, which `accelerator.rs` surfaces as `unavailableReason`.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"] }
+ndarray = "0.16"
+
 [features]
-# Compile-time switches that map to whisper.cpp's CMake flags.
+# Compile-time switches that map to whisper.cpp's CMake flags AND ort's
+# execution-provider feature flags.
 #
-# The default set is empty (= pure CPU whisper.cpp) so plain
+# The default set is empty (= pure CPU whisper.cpp + ORT CPU EP) so plain
 # `cargo build` works on any machine without extra toolchains. Real
 # release builds opt into hardware acceleration via the matrix below
 # AND via the target-conditional `[target.…]` blocks at the bottom of
@@ -58,15 +69,40 @@ whisper-rs = { version = "0.16", default-features = false }
 #
 # Manual overrides (use these if you build outside CI):
 #
-#   cargo build --features metal       # Apple GPU (auto on macOS)
-#   cargo build --features coreml      # Apple Neural Engine (auto on macOS/iOS)
-#   cargo build --features cuda        # NVIDIA GPU  (Windows/Linux, opt-in)
-#   cargo build --features openblas    # Faster CPU matmul (any OS)
+#   cargo build --features metal           # Apple GPU (auto on macOS)
+#   cargo build --features coreml          # Apple Neural Engine (auto on macOS/iOS)
+#   cargo build --features cuda            # NVIDIA GPU  (Windows/Linux, opt-in)
+#   cargo build --features openblas        # Faster CPU matmul (any OS)
+#   cargo build --features ort-directml    # Windows DirectML (any GPU/NPU via DX12)
+#   cargo build --features ort-cuda        # NVIDIA via ORT CUDA EP
+#   cargo build --features ort-openvino    # Intel iGPU/NPU via OpenVINO EP
+#   cargo build --features ort-qnn         # Qualcomm Hexagon NPU via QNN EP
+#   cargo build --features ort-coreml      # Apple ANE/GPU via ORT CoreML EP
 default = []
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 coreml = ["whisper-rs/coreml"]
 openblas = ["whisper-rs/openblas"]
+
+# ORT execution-provider feature flags. Each flag turns on the matching EP
+# at compile time so ort registers it; the EP DLLs themselves must still
+# be present at runtime (DirectML.dll ships with Win10+; OpenVINO/QNN need
+# vendor SDKs).
+ort-directml = ["ort/directml"]
+ort-cuda     = ["ort/cuda"]
+ort-openvino = ["ort/openvino"]
+ort-qnn      = ["ort/qnn"]
+ort-coreml   = ["ort/coreml"]
+
+# Convenience meta-feature: enable every ORT EP that whisper-rs's whisper.cpp
+# can't already cover. Used by the "Voxnap-Universal" CI artifact which is
+# the binary that flips every NPU/GPU bucket from "Not bundled" to
+# "Available" at runtime, modulo the host actually shipping the hardware.
+#
+# We deliberately don't put this on by default because each EP pulls in a
+# vendor SDK at link time on some platforms.
+ort-all = ["ort-directml", "ort-cuda", "ort-openvino", "ort-qnn", "ort-coreml"]
+
 
 # ---------------------------------------------------------------------------
 # Target-conditional defaults
