@@ -55,7 +55,21 @@ whisper-rs = { version = "0.16", default-features = false }
 # vendor-supplied DLLs at runtime; ort returns "EP not registered" if they
 # are missing, which `accelerator.rs` surfaces as `unavailableReason`.
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"] }
-ndarray = "0.16"
+# Must match the ndarray major version `ort` depends on (currently 0.17),
+# otherwise the `From<ArrayView<...>>` impls don't line up and
+# `TensorRef::from_array_view` rejects our tensors at compile time.
+ndarray = "0.17"
+
+# Whisper-via-ONNX building blocks (used by `onnx_engine` Phase 2):
+#   • `rustfft`     — STFT inside the log-mel feature extractor.
+#   • `tokenizers`  — HuggingFace's BPE/WordPiece runtime; we load the
+#                     `tokenizer.json` shipped alongside ONNX Whisper
+#                     bundles (vocab + merges baked in).
+#   • `num-complex` — complex-number arithmetic for FFT bins.
+rustfft = "6"
+num-complex = "0.4"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
 
 [features]
 # Compile-time switches that map to whisper.cpp's CMake flags AND ort's

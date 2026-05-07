@@ -17,8 +17,58 @@ use crate::accelerator::{self, AcceleratorInfo};
 use crate::audio::{self, AudioDeviceInfo};
 use crate::error::{Error, Result};
 use crate::models::{self, ModelInfo};
+use crate::onnx_engine::{self, OnnxConfig};
 use crate::state::{AppState, Session};
 use crate::whisper::{self, WhisperConfig};
+
+/// Decide which inference pipeline (`whisper-cpp` vs `onnx`) should serve
+/// the user's `compute_backend` choice.
+///
+/// We ask `accelerator::detect()` what each bucket maps to and look up the
+/// matching `provider` field. That way the pipeline choice is driven by
+/// the *runtime probe* rather than a hard-coded table — a build with
+/// `--features ort-cuda` but no `--features cuda` will dispatch CUDA
+/// requests to the ONNX path automatically, and vice versa.
+///
+/// Falls back to `"whisper-cpp"` if no matching accelerator is detected
+/// (which is also the legacy behaviour).
+fn pick_provider(compute_backend: Option<&str>) -> &'static str {
+    let want = compute_backend.unwrap_or("auto");
+    if want == "cpu" || want == "auto" {
+        // CPU + auto stay on whisper.cpp because that is the more mature
+        // pipeline today (beam search, partial emissions, KV cache). The
+        // ONNX path takes over the moment the user pins a specific
+        // accelerator that whisper.cpp can't serve.
+        return "whisper-cpp";
+    }
+
+    // Look for the *first available* row matching the requested bucket.
+    // Each `AcceleratorInfo.id` is "npu" / "gpu" / "cpu", so we filter to
+    // the user's bucket and pick the first one with `available = true`.
+    for a in accelerator::detect() {
+        if a.id == want && a.available {
+            return a.provider;
+        }
+    }
+    // Bucket has no available accelerator (e.g. user picked "npu" on a
+    // build without any ORT EP). whisper.cpp will silently fall back to
+    // CPU — same observed behaviour as before this dispatcher landed.
+    "whisper-cpp"
+}
+
+/// Convert the JS-side WhisperConfig into the OnnxConfig the parallel
+/// pipeline expects. The two configs were intentionally given identical
+/// JSON shapes so this is mostly field-by-field.
+fn whisper_to_onnx(cfg: &WhisperConfig) -> OnnxConfig {
+    OnnxConfig {
+        model_id: cfg.model_id.clone(),
+        language: cfg.language.clone(),
+        model_dir: cfg.model_dir.clone(),
+        translate: cfg.translate,
+        threads: cfg.threads,
+        compute_backend: cfg.compute_backend.clone(),
+    }
+}
 
 const EV_STATE: &str = "voxnap://state-change";
 const EV_ERROR: &str = "voxnap://error";
@@ -110,7 +160,26 @@ pub async fn voxnap_start(
 
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let whisper_handle = whisper::spawn(app.clone(), cfg, consumer, shutdown_rx);
+
+    // Pick the inference pipeline based on the user's compute_backend
+    // preference and the runtime probe in `accelerator::detect()`. The
+    // ONNX path takes over when the user pins NPU/GPU and the matching
+    // ORT execution provider is actually available; otherwise we stay on
+    // whisper.cpp (the more mature pipeline today).
+    let provider = pick_provider(cfg.compute_backend.as_deref());
+    tracing::info!(
+        compute_backend = %cfg.compute_backend.as_deref().unwrap_or("auto"),
+        provider,
+        "voxnap_start: dispatching to inference pipeline"
+    );
+    let whisper_handle = match provider {
+        "onnx" => {
+            let onnx_cfg = whisper_to_onnx(&cfg);
+            onnx_engine::spawn(app.clone(), onnx_cfg, consumer, shutdown_rx)
+        }
+        // "whisper-cpp" / "cpu" / unknown — keep the legacy path.
+        _ => whisper::spawn(app.clone(), cfg, consumer, shutdown_rx),
+    };
 
     // Park the cpal stream on a dedicated OS thread; cpal's `Stream` is
     // !Send on some platforms, so we leak it into a thread that just waits

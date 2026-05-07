@@ -34,10 +34,12 @@ mod accelerator;
 mod audio;
 mod commands;
 mod error;
+mod mel;
 mod models;
 mod onnx_engine;
 mod state;
 mod whisper;
+mod whisper_tokens;
 
 /// Entry point shared by both the desktop binary (`main.rs`) and the
 /// mobile crate (`apps/mobile/src-tauri`).

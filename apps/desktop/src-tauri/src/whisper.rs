@@ -474,9 +474,9 @@ pub fn spawn(
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct EngineErrorEvent {
-    code: &'static str,
-    message: String,
+pub(crate) struct EngineErrorEvent {
+    pub code: &'static str,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -485,14 +485,14 @@ struct RawSegment {
     confidence: Option<f32>,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
-fn level_of(samples: &[f32]) -> (f32, f32) {
+pub(crate) fn level_of(samples: &[f32]) -> (f32, f32) {
     if samples.is_empty() {
         return (0.0, 0.0);
     }
