@@ -98,6 +98,54 @@ export interface AudioLevel {
   at: number;
 }
 
+/**
+ * Where the model should run.
+ *
+ *  • `"auto"` — let the engine pick the best available accelerator
+ *               (NPU > GPU > CPU). This is the default and recommended
+ *               for most users.
+ *  • `"npu"`  — neural-processing-unit / dedicated AI accelerator
+ *               (Apple Neural Engine via CoreML, Intel AI Boost via
+ *               OpenVINO, Qualcomm Hexagon via QNN, …). Falls back to
+ *               GPU/CPU silently if unavailable in this build.
+ *  • `"gpu"`  — GPU compute (Metal, CUDA, Vulkan).
+ *  • `"cpu"`  — pure-CPU inference. Slowest but always available.
+ */
+export type ComputeBackend = "auto" | "cpu" | "gpu" | "npu";
+
+/**
+ * A compute target that whisper.cpp can run on, as detected by the engine
+ * at runtime. The UI shows these in Settings → Model and the onboarding
+ * Compute step so the user can confirm "yes, my NPU is being used".
+ */
+export interface AcceleratorInfo {
+  /** Logical bucket the user picks from (`"auto"` is never returned). */
+  id: Exclude<ComputeBackend, "auto">;
+  /** Human-friendly name, e.g. "Apple Neural Engine", "NVIDIA RTX 4070". */
+  label: string;
+  /** Vendor string when known, e.g. "Apple", "NVIDIA", "Intel", "Qualcomm". */
+  vendor?: string;
+  /**
+   * whisper.cpp backend identifier this accelerator maps to:
+   * `"coreml" | "metal" | "cuda" | "vulkan" | "openvino" | "qnn" | "cpu"`.
+   * Purely informational — the engine itself decides what to wire up.
+   */
+  backend: string;
+  /**
+   * `true` if this accelerator is actually usable by the current binary.
+   * Detection may notice an NPU on the host but the build may have been
+   * compiled without the matching whisper.cpp feature flag — in which
+   * case `available` is `false` and `unavailableReason` explains why.
+   */
+  available: boolean;
+  /**
+   * Human-readable reason this accelerator is greyed out in the UI, e.g.
+   * "Build the desktop app with the `coreml` cargo feature to enable
+   *  Apple Neural Engine acceleration."
+   */
+  unavailableReason?: string;
+}
+
 export interface EngineConfig {
   modelId: WhisperModelId;
   /** Override model file location (Tauri only). If unset, engine picks default. */
@@ -118,6 +166,11 @@ export interface EngineConfig {
    * Tauri only; defaults to `true`.
    */
   vadEnabled?: boolean;
+  /**
+   * Where the model should run. Defaults to `"auto"` (NPU > GPU > CPU).
+   * Engines that don't expose a runtime backend choice may ignore this.
+   */
+  computeBackend?: ComputeBackend;
 }
 
 /** Lifecycle states a transcription engine can be in. */

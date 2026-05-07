@@ -28,18 +28,36 @@ pnpm dev:desktop            # equivalent to: tauri dev (from this folder)
 
 ## Hardware acceleration
 
-`Cargo.toml` exposes feature flags for the whisper.cpp backends:
+End users **never** compile anything — they grab the installer for their
+platform from the GitHub Release. The CI matrix
+([`.github/workflows/release.yml`](../../.github/workflows/release.yml))
+produces one artifact per (OS, accelerator) combination:
+
+| Platform                 | Accelerator                | How it's enabled                          |
+| ------------------------ | -------------------------- | ----------------------------------------- |
+| macOS (Apple Silicon)    | Metal + CoreML (auto)      | `[target.'cfg(target_os = "macos")']` in `Cargo.toml` adds the features automatically. |
+| macOS (Intel)            | Metal (auto)               | Same target-cfg block.                    |
+| Windows / Linux (vanilla)| CPU                        | Default features = `[]` — runs everywhere.|
+| Windows / Linux (NVIDIA) | CUDA                       | Separate matrix entry passes `--features cuda`. Shipped as a distinct "voxnap-…-cuda" installer; users with NVIDIA GPUs grab that one. |
+| iOS                      | CoreML (auto)              | `[target.'cfg(target_os = "ios")']` block.|
+| Android                  | CPU                        | No GPU/NPU path in whisper.cpp yet.       |
+
+If you want to build locally with a non-default backend:
 
 ```bash
-# Apple Silicon
-pnpm --filter @voxnap/desktop tauri build --features metal
+# Apple Silicon (already auto on macOS, just for parity)
+pnpm --filter @voxnap/desktop tauri build -- --features metal
 
-# NVIDIA
-pnpm --filter @voxnap/desktop tauri build --features cuda
+# NVIDIA — needs the CUDA Toolkit installed locally
+pnpm --filter @voxnap/desktop tauri build -- --features cuda
 
-# CPU + faster matmul
-pnpm --filter @voxnap/desktop tauri build --features openblas
+# Faster CPU matmul (BLAS)
+pnpm --filter @voxnap/desktop tauri build -- --features openblas
 ```
+
+To cut a release for *every* OS at once: tag a commit with `vX.Y.Z` and
+push — the `Release`, `Mobile Release` and `Web` workflows will produce
+all installers and attach them to the GitHub Release.
 
 ## IPC contract
 

@@ -13,6 +13,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::accelerator::{self, AcceleratorInfo};
 use crate::audio::{self, AudioDeviceInfo};
 use crate::error::{Error, Result};
 use crate::models::{self, ModelInfo};
@@ -171,6 +172,15 @@ pub async fn voxnap_dispose(app: AppHandle, state: State<'_, AppState>) -> Resul
 #[tauri::command]
 pub fn voxnap_list_devices() -> Result<Vec<AudioDeviceInfo>> {
     audio::list_devices()
+}
+
+/// Report the compute accelerators (NPU / GPU / CPU) we can offer on this
+/// host given the current cargo features. The UI (`Settings → Model` and
+/// the onboarding `Compute` step) renders these so the user can confirm
+/// "yes, my NPU is being used" or pin a specific backend.
+#[tauri::command]
+pub fn voxnap_list_accelerators() -> Vec<AcceleratorInfo> {
+    accelerator::detect()
 }
 
 // ────────────────────────────────────────────────────────────────────────────

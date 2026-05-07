@@ -7,6 +7,7 @@
  * and the UI portable across desktop / mobile / web.
  */
 import type {
+  AcceleratorInfo,
   AudioDevice,
   AudioLevel,
   EngineConfig,
@@ -40,6 +41,17 @@ export interface ITranscriptionEngine {
 
   /** List available audio input devices. */
   listDevices(): Promise<AudioDevice[]>;
+
+  /**
+   * List the compute accelerators (NPU / GPU / CPU) the engine can target
+   * on the current host. The UI uses this to render the Compute backend
+   * picker in Settings and Onboarding so the user can confirm "yes, my
+   * NPU is being used" or pin a specific backend.
+   *
+   * Optional: engines that don't expose a runtime backend choice can
+   * leave this undefined; the UI then falls back to a static "CPU" entry.
+   */
+  listAccelerators?(): Promise<AcceleratorInfo[]>;
 
   /**
    * Begin capturing audio and emitting segments.

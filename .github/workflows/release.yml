@@ -1,0 +1,228 @@
+name: Release
+
+# Build a signed/installable Voxnap bundle for *every* supported desktop
+# platform whenever a `v*` tag is pushed. The resulting installers are
+# uploaded to the matching GitHub Release so end-users only have to click
+# "Download" — they never need to install Rust, CUDA, Xcode or anything
+# else just to run the app.
+#
+# Matrix coverage
+# ---------------
+#   • macOS Apple Silicon  → .dmg / .app  (Metal + CoreML auto-enabled)
+#   • macOS Intel          → .dmg / .app  (Metal + CoreML auto-enabled)
+#   • Windows x64 (CPU)    → .msi / .exe  (works on every Windows box)
+#   • Windows x64 (CUDA)   → .msi / .exe  (separate "NVIDIA" artifact)
+#   • Linux x64 (CPU)      → .AppImage / .deb
+#   • Linux x64 (CUDA)     → .AppImage / .deb
+#
+# Mobile (Android APK / iOS IPA) lives in `mobile.yml` because it needs a
+# different toolchain (Android NDK / Xcode) and signing setup.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to publish (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---------------- macOS ----------------
+          - label: macOS (Apple Silicon)
+            os: macos-14
+            rust-target: aarch64-apple-darwin
+            tauri-args: "--target aarch64-apple-darwin"
+            features: ""              # metal+coreml auto-enabled via Cargo.toml
+            artifact-suffix: macos-arm64
+
+          - label: macOS (Intel)
+            os: macos-13
+            rust-target: x86_64-apple-darwin
+            tauri-args: "--target x86_64-apple-darwin"
+            features: ""              # metal+coreml auto-enabled via Cargo.toml
+            artifact-suffix: macos-x64
+
+          # ---------------- Windows ----------------
+          - label: Windows x64 (CPU)
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            tauri-args: ""
+            features: ""              # pure CPU — runs on every Windows box
+            artifact-suffix: windows-x64
+
+          - label: Windows x64 (NVIDIA / CUDA)
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            tauri-args: "-- --features cuda"
+            features: "cuda"
+            cuda: true
+            artifact-suffix: windows-x64-cuda
+
+          # ---------------- Linux ----------------
+          - label: Linux x64 (CPU)
+            os: ubuntu-22.04
+            rust-target: x86_64-unknown-linux-gnu
+            tauri-args: ""
+            features: ""
+            artifact-suffix: linux-x64
+
+          - label: Linux x64 (NVIDIA / CUDA)
+            os: ubuntu-22.04
+            rust-target: x86_64-unknown-linux-gnu
+            tauri-args: "-- --features cuda"
+            features: "cuda"
+            cuda: true
+            artifact-suffix: linux-x64-cuda
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Toolchains ----------------------------------------------------
+      - name: Setup Node + pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache cargo registry & target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+          key: ${{ matrix.artifact-suffix }}
+
+      # --- Linux system deps (Tauri webview + audio) ---------------------
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libssl-dev \
+            patchelf
+
+      # --- CUDA toolkit (only for the CUDA matrix entries) ---------------
+      - name: Install CUDA Toolkit (Windows)
+        if: matrix.cuda && runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.4.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+
+      - name: Install CUDA Toolkit (Linux)
+        if: matrix.cuda && runner.os == 'Linux'
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: "12.4.0"
+          method: network
+          linux-local-args: '["--toolkit"]'
+
+      # --- Install JS deps ----------------------------------------------
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --- Fetch the default whisper model so it's bundled --------------
+      - name: Fetch whisper model
+        run: pnpm fetch:model
+
+      # --- Build the Tauri bundle ---------------------------------------
+      - name: Tauri build (${{ matrix.label }})
+        env:
+          # macOS code-signing & notarisation are optional. If these
+          # secrets are not set we just produce an unsigned .app/.dmg —
+          # users can still right-click → Open the first time. CI builds
+          # for tagged releases should set these in repo Settings →
+          # Secrets so end-users get a frictionless install.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows code-signing (optional)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          cd apps/desktop
+          pnpm tauri build ${{ matrix.tauri-args }}
+
+      # --- Collect installers in a flat folder for the upload step ------
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          set -e
+          mkdir -p _release
+          ROOT="apps/desktop/src-tauri/target"
+          # Tauri puts bundles under target/<rust-triple>/release/bundle/...
+          # but for the host triple (no --target) it lives in target/release/bundle.
+          # Glob both to catch every matrix entry.
+          shopt -s nullglob globstar
+          for f in \
+            "$ROOT"/**/release/bundle/**/*.{dmg,app.tar.gz,msi,exe,AppImage,deb,rpm,zip} \
+            "$ROOT"/release/bundle/**/*.{dmg,app.tar.gz,msi,exe,AppImage,deb,rpm,zip}
+          do
+            [ -e "$f" ] || continue
+            base="$(basename "$f")"
+            cp -f "$f" "_release/${base%.*}-${{ matrix.artifact-suffix }}.${f##*.}"
+          done
+          ls -la _release || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxnap-${{ matrix.artifact-suffix }}
+          path: _release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la dist
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: dist/*

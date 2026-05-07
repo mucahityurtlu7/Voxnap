@@ -3,7 +3,5 @@
 # works without manually calling vcvars64.bat beforehand.
 
 [env]
-# whisper-rs-sys: skip re-running bindgen (uses the patched pre-built bindings).
-WHISPER_DONT_GENERATE_BINDINGS = "1"
-# libclang path needed by bindgen (even when skipping, avoids fallback errors).
+# Use the installed LLVM/clang for bindgen (generates Windows-native bindings).
 LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"

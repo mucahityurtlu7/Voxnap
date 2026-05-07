@@ -11,7 +11,12 @@
  */
 import { nanoid } from "nanoid";
 
-import type { AudioDevice, EngineConfig, EngineState } from "../types.js";
+import type {
+  AcceleratorInfo,
+  AudioDevice,
+  EngineConfig,
+  EngineState,
+} from "../types.js";
 import { EngineEmitter, type ITranscriptionEngine } from "./ITranscriptionEngine.js";
 
 const SCRIPT: { text: string; speakerId: string }[] = [
@@ -54,6 +59,34 @@ export class MockEngine extends EngineEmitter implements ITranscriptionEngine {
 
   async listDevices(): Promise<AudioDevice[]> {
     return [{ id: "mock", label: "Mock microphone", isDefault: true }];
+  }
+
+  async listAccelerators(): Promise<AcceleratorInfo[]> {
+    // Pretend the host has a fancy NPU so the picker has something to
+    // render in dev / Storybook. None of these actually do anything in
+    // the mock engine — they're just there for visual fidelity.
+    return [
+      {
+        id: "npu",
+        label: "Mock NPU (demo)",
+        vendor: "Voxnap",
+        backend: "mock-npu",
+        available: true,
+      },
+      {
+        id: "gpu",
+        label: "Mock GPU (demo)",
+        vendor: "Voxnap",
+        backend: "mock-gpu",
+        available: true,
+      },
+      {
+        id: "cpu",
+        label: "CPU",
+        backend: "cpu",
+        available: true,
+      },
+    ];
   }
 
   async start(_deviceId?: string): Promise<void> {

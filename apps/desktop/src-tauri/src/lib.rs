@@ -30,6 +30,7 @@
 //! still streams audio-level events so the UI can confirm wiring.
 
 
+mod accelerator;
 mod audio;
 mod commands;
 mod error;
@@ -61,6 +62,7 @@ pub fn run() {
             commands::voxnap_stop,
             commands::voxnap_dispose,
             commands::voxnap_list_devices,
+            commands::voxnap_list_accelerators,
             commands::voxnap_list_models,
             commands::voxnap_models_dir,
             commands::voxnap_download_model,

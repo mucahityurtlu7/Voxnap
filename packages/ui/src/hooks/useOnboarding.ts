@@ -18,6 +18,7 @@ import {
   ONBOARDING_STEPS,
   useOnboardingStore,
   type AiProvider,
+  type ComputeBackend,
   type OnboardingStep,
   type OnboardingTheme,
   type SummaryLength,
@@ -47,6 +48,7 @@ export interface UseOnboardingApi {
     translateToEnglish: boolean;
     vadThreshold: number;
     vadEnabled: boolean;
+    computeBackend: ComputeBackend;
     aiProvider: AiProvider;
     aiApiKey: string;
     summaryLength: SummaryLength;
@@ -58,6 +60,7 @@ export interface UseOnboardingApi {
   setModelId: (id: WhisperModelId) => void;
   setLanguage: (lang: string) => void;
   setTranslateToEnglish: (v: boolean) => void;
+  setComputeBackend: (b: ComputeBackend) => void;
   setAiProvider: (p: AiProvider) => void;
   setAiApiKey: (k: string) => void;
   setSummaryLength: (l: SummaryLength) => void;
@@ -81,6 +84,7 @@ export function useOnboarding(): UseOnboardingApi {
   const translateToEnglish = useOnboardingStore((s) => s.translateToEnglish);
   const vadThreshold = useOnboardingStore((s) => s.vadThreshold);
   const vadEnabled = useOnboardingStore((s) => s.vadEnabled);
+  const computeBackend = useOnboardingStore((s) => s.computeBackend);
   const aiProvider = useOnboardingStore((s) => s.aiProvider);
   const aiApiKey = useOnboardingStore((s) => s.aiApiKey);
   const summaryLength = useOnboardingStore((s) => s.summaryLength);
@@ -93,6 +97,7 @@ export function useOnboarding(): UseOnboardingApi {
   const setTranslateToEnglish = useOnboardingStore(
     (s) => s.setTranslateToEnglish,
   );
+  const setComputeBackend = useOnboardingStore((s) => s.setComputeBackend);
   const setAiProvider = useOnboardingStore((s) => s.setAiProvider);
   const setAiApiKey = useOnboardingStore((s) => s.setAiApiKey);
   const setSummaryLength = useOnboardingStore((s) => s.setSummaryLength);
@@ -128,6 +133,7 @@ export function useOnboarding(): UseOnboardingApi {
       translateToEnglish,
       vadThreshold,
       vadEnabled,
+      computeBackend,
       aiProvider,
       aiApiKey,
       summaryLength,
@@ -139,6 +145,7 @@ export function useOnboarding(): UseOnboardingApi {
     setModelId,
     setLanguage,
     setTranslateToEnglish,
+    setComputeBackend,
     setAiProvider,
     setAiApiKey,
     setSummaryLength,

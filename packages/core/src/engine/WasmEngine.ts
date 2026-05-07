@@ -21,7 +21,13 @@
  */
 import { nanoid } from "nanoid";
 
-import type { AudioDevice, EngineConfig, EngineState, TranscriptionSegment } from "../types.js";
+import type {
+  AcceleratorInfo,
+  AudioDevice,
+  EngineConfig,
+  EngineState,
+  TranscriptionSegment,
+} from "../types.js";
 import { EngineEmitter, type ITranscriptionEngine } from "./ITranscriptionEngine.js";
 
 /** Messages sent from main thread to worker. */
@@ -158,6 +164,40 @@ export class WasmEngine extends EngineEmitter implements ITranscriptionEngine {
         }));
     }
     return [{ id: "default", label: "Default microphone", isDefault: true }];
+  }
+
+  async listAccelerators(): Promise<AcceleratorInfo[]> {
+    // The browser whisper.wasm build doesn't currently delegate to the
+    // host NPU/GPU — it runs SIMD-accelerated CPU code inside the worker.
+    // We probe `navigator.gpu` so a future WebGPU backend can show up
+    // automatically without UI changes.
+    const list: AcceleratorInfo[] = [];
+
+    const hasWebGpu =
+      typeof navigator !== "undefined" &&
+      !!(navigator as Navigator & { gpu?: unknown }).gpu;
+
+    if (hasWebGpu) {
+      list.push({
+        id: "gpu",
+        label: "WebGPU (browser)",
+        backend: "webgpu",
+        // whisper.wasm doesn't ship a WebGPU backend in our current bundle,
+        // so we surface this as detected-but-not-wired.
+        available: false,
+        unavailableReason:
+          "WebGPU detected but the bundled whisper.wasm build runs on CPU. A WebGPU build will be enabled in a future release.",
+      });
+    }
+
+    list.push({
+      id: "cpu",
+      label: "CPU (WebAssembly · SIMD)",
+      backend: "wasm-simd",
+      available: true,
+    });
+
+    return list;
   }
 
   async start(_deviceId?: string): Promise<void> {

@@ -98,6 +98,18 @@ pub struct WhisperConfig {
     /// speech. Defaults to `true`.
     #[serde(default = "default_vad_enabled")]
     pub vad_enabled: bool,
+
+    /// Where the model should run.
+    ///
+    /// `"auto"` (default) lets whisper.cpp pick the best backend that was
+    /// compiled in (NPU > GPU > CPU). `"cpu"` forces pure-CPU inference
+    /// even on hardware where Metal/CUDA/CoreML are available — useful
+    /// for diagnosing accelerator-specific bugs. `"gpu"` and `"npu"`
+    /// behave like `"auto"` today (whisper.cpp doesn't expose a finer
+    /// runtime knob); they're accepted so the JS side and the user's
+    /// stored preference always round-trip cleanly.
+    #[serde(default)]
+    pub compute_backend: Option<String>,
 }
 
 fn default_vad_enabled() -> bool {
@@ -106,6 +118,18 @@ fn default_vad_enabled() -> bool {
 
 fn default_lang() -> String {
     "auto".into()
+}
+
+/// Translate a JS `ComputeBackend` string into the `use_gpu` flag that
+/// whisper-rs accepts. `None` / unknown / `"auto"` → leave the host's
+/// best accelerator on, `"cpu"` → force CPU.
+fn use_gpu_for(backend: Option<&str>) -> bool {
+    match backend {
+        Some("cpu") => false,
+        // "auto" / "gpu" / "npu" / unknown / unset → let whisper.cpp use
+        // whatever accelerator the build linked in.
+        _ => true,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,7 +236,7 @@ pub fn spawn(
         // ─────────────────────────────────────────────────────────────────
         let mut ctx: Option<WhisperCtx> = None;
         match resolve_model_path(&app, &cfg) {
-            Ok(p) => match WhisperCtx::load(&p) {
+            Ok(p) => match WhisperCtx::load(&p, &cfg) {
                 Ok(c) => {
                     tracing::info!("loaded model: {}", p.display());
                     ctx = Some(c);
@@ -624,8 +648,17 @@ struct WhisperCtx {
 }
 
 impl WhisperCtx {
-    fn load(path: &std::path::Path) -> Result<Self> {
-        let params = whisper_rs::WhisperContextParameters::default();
+    fn load(path: &std::path::Path, cfg: &WhisperConfig) -> Result<Self> {
+        let mut params = whisper_rs::WhisperContextParameters::default();
+        // whisper-rs's `use_gpu` is the master switch for CoreML / Metal /
+        // CUDA depending on which feature was compiled in. Off ⇒ pure CPU.
+        let use_gpu = use_gpu_for(cfg.compute_backend.as_deref());
+        params.use_gpu(use_gpu);
+        tracing::info!(
+            backend = cfg.compute_backend.as_deref().unwrap_or("auto"),
+            use_gpu,
+            "loading whisper context"
+        );
         let inner = whisper_rs::WhisperContext::new_with_params(
             path.to_string_lossy().as_ref(),
             params,

@@ -21,6 +21,7 @@ import {
   useAiStore,
   useOnboardingStore,
   type AiProvider,
+  type ComputeBackend,
   type SummaryLength,
   type WhisperModelId,
 } from "@voxnap/core";
@@ -33,6 +34,7 @@ import { Badge } from "../components/ui/Badge.js";
 import { Button } from "../components/ui/Button.js";
 import { Kbd } from "../components/ui/Kbd.js";
 import { ModelManagerPanel } from "../components/ModelManagerPanel.js";
+import { ComputeBackendPicker } from "../components/ComputeBackendPicker.js";
 import { useTheme, type ThemeMode } from "../hooks/useTheme.js";
 import { formatShortcut } from "../hooks/useShortcuts.js";
 import { useOnboarding } from "../hooks/useOnboarding.js";
@@ -259,6 +261,8 @@ function ModelSection({
   onTranslateChange?: (v: boolean) => void;
 }) {
   const [threads, setThreads] = useState(4);
+  const computeBackend = useOnboardingStore((s) => s.computeBackend);
+  const setComputeBackend = useOnboardingStore((s) => s.setComputeBackend);
   return (
     <Section
       title="Model"
@@ -271,6 +275,17 @@ function ModelSection({
         <ModelManagerPanel
           selectedModelId={modelId}
           onSelect={onModelChange}
+        />
+      </Field>
+
+      <Field
+        label="Compute backend"
+        description="Where models run. Auto picks the fastest accelerator detected on this device — usually an NPU or GPU when one is available."
+      >
+        <ComputeBackendPicker
+          value={computeBackend}
+          onChange={(b: ComputeBackend) => setComputeBackend(b)}
+          hideHeader
         />
       </Field>
 

@@ -16,8 +16,15 @@ import react from "@vitejs/plugin-react";
  *     re-bundled (which would break dynamic imports of the WASM glue).
  *   - The library uses `import.meta.url` to locate its assets, which
  *     works out of the box with Vite's ES-module workers.
+ *
+ * GitHub Pages base path:
+ *   - When deployed to `https://<user>.github.io/<repo>/` Vite needs to know
+ *     about the `/<repo>/` prefix so asset URLs resolve. The CI workflow
+ *     (`.github/workflows/web.yml`) sets `VITE_BASE_PATH=/Voxnap/` for the
+ *     production build; locally `pnpm dev:web` uses `/` so nothing changes.
  */
 export default defineConfig({
+  base: process.env.VITE_BASE_PATH ?? "/",
   plugins: [react()],
   server: {
     port: 5173,

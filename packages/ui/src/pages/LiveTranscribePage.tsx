@@ -27,6 +27,7 @@ import {
   DEFAULT_MODEL,
   useOnboardingStore,
   useTranscriptionStore,
+  type ComputeBackend,
   type Session,
   type Speaker,
   type SpeakerColor,
@@ -58,6 +59,11 @@ export interface LiveTranscribePageProps {
   vadThreshold?: number;
   /** When false, VAD is bypassed and whisper always runs. Default true. */
   vadEnabled?: boolean;
+  /**
+   * Where the model should run (`"auto" | "npu" | "gpu" | "cpu"`).
+   * Default `"auto"` lets the engine pick the best accelerator.
+   */
+  computeBackend?: ComputeBackend;
 }
 
 export function LiveTranscribePage({
@@ -66,6 +72,7 @@ export function LiveTranscribePage({
   translate = false,
   vadThreshold = 0.012,
   vadEnabled = true,
+  computeBackend = "auto",
 }: LiveTranscribePageProps) {
   const t = useTranscription();
   const summarizer = useSummarizer();
@@ -105,6 +112,7 @@ export function LiveTranscribePage({
     translate: boolean;
     vadThreshold: number;
     vadEnabled: boolean;
+    computeBackend: ComputeBackend;
   } | null>(null);
 
   const startedAtRef = useRef<number | null>(null);
@@ -132,7 +140,14 @@ export function LiveTranscribePage({
   // first — typically the onboarding default of `"auto"` — and the
   // user's later language change is silently ignored.
   useEffect(() => {
-    const next = { modelId, language, translate, vadThreshold, vadEnabled };
+    const next = {
+      modelId,
+      language,
+      translate,
+      vadThreshold,
+      vadEnabled,
+      computeBackend,
+    };
     const prev = lastConfigRef.current;
     if (
       prev &&
@@ -140,7 +155,8 @@ export function LiveTranscribePage({
       prev.language === next.language &&
       prev.translate === next.translate &&
       prev.vadThreshold === next.vadThreshold &&
-      prev.vadEnabled === next.vadEnabled
+      prev.vadEnabled === next.vadEnabled &&
+      prev.computeBackend === next.computeBackend
     ) {
       return;
     }
@@ -151,7 +167,14 @@ export function LiveTranscribePage({
     (async () => {
       try {
         if (wasRunning) await t.stop();
-        await t.init({ modelId, language, translate, vadThreshold, vadEnabled });
+        await t.init({
+          modelId,
+          language,
+          translate,
+          vadThreshold,
+          vadEnabled,
+          computeBackend,
+        });
         if (!cancelled) lastConfigRef.current = next;
       } catch (err) {
         if (cancelled) return;
@@ -175,7 +198,7 @@ export function LiveTranscribePage({
     // re-inits so we deliberately exclude it from the dep list to avoid
     // double-initing on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelId, language, translate, vadThreshold, vadEnabled]);
+  }, [modelId, language, translate, vadThreshold, vadEnabled, computeBackend]);
 
 
   // Track recording start for the elapsed timer.

@@ -92,6 +92,42 @@ Project-level MCP configs are committed for **VS Code**, **Antigravity**,
 assistants can query the graph (`graphify-voxnap` server) the moment you open
 the workspace. Full guide: [`docs/graphify.md`](./docs/graphify.md).
 
+## Releases & GPU acceleration
+
+You **don't compile anything as a user**. Cut a release by tagging:
+
+```bash
+git tag v0.1.0 && git push --tags
+```
+
+That triggers three GitHub Actions workflows that build & publish
+installers for every supported platform:
+
+| Workflow                                                   | Produces                                                      |
+| ---------------------------------------------------------- | ------------------------------------------------------------- |
+| [`.github/workflows/release.yml`](./.github/workflows/release.yml) | `.dmg` (macOS arm64 & x64), `.msi`/`.exe` (Windows CPU + CUDA), `.AppImage`/`.deb` (Linux CPU + CUDA) |
+| [`.github/workflows/mobile.yml`](./.github/workflows/mobile.yml)   | Android `.apk` + `.aab`, iOS `.ipa` (or simulator `.app.zip`) |
+| [`.github/workflows/web.yml`](./.github/workflows/web.yml)         | Browser SPA deployed to GitHub Pages                          |
+
+Hardware acceleration is wired in at build time — never asked of the
+user:
+
+- **macOS / iOS** — Metal + CoreML are auto-enabled via
+  `[target.'cfg(target_os = "…")']` in
+  [`apps/desktop/src-tauri/Cargo.toml`](./apps/desktop/src-tauri/Cargo.toml),
+  so every Apple build ships ANE + GPU support without flags.
+- **Windows / Linux** — vanilla artifact is pure CPU (works on every
+  box). A separate "voxnap-…-cuda" artifact is shipped for NVIDIA users
+  because a CUDA-linked binary requires the NVIDIA runtime DLLs to be
+  present on the host.
+- **Android** — CPU only (no whisper.cpp GPU/NPU path on Android yet).
+- **Web** — whisper.wasm runs SIMD-accelerated CPU; WebGPU is detected
+  at runtime by the engine when the bundle gains a WebGPU build.
+
+Background on the engine-level abstraction (NPU / GPU / CPU picker)
+lives in [`packages/core/src/types.ts`](./packages/core/src/types.ts) and
+[`apps/desktop/src-tauri/src/accelerator.rs`](./apps/desktop/src-tauri/src/accelerator.rs).
+
 ## License
 
 MIT.

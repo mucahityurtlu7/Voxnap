@@ -13,7 +13,7 @@
  *   return <AppShell>...</AppShell>;
  */
 import { type ReactNode } from "react";
-import { Sparkles, Mic, Cpu, Palette, Languages } from "lucide-react";
+import { Sparkles, Mic, Cpu, Palette, Languages, Zap } from "lucide-react";
 import {
   useAiStore,
   type AiProvider,
@@ -27,6 +27,7 @@ import { WelcomeStep } from "./steps/WelcomeStep.js";
 import { ThemeStep } from "./steps/ThemeStep.js";
 import { MicrophoneStep } from "./steps/MicrophoneStep.js";
 import { ModelStep } from "./steps/ModelStep.js";
+import { ComputeStep } from "./steps/ComputeStep.js";
 import { LanguageStep } from "./steps/LanguageStep.js";
 import { AiStep, isAiStepValid } from "./steps/AiStep.js";
 import { DoneStep } from "./steps/DoneStep.js";
@@ -68,6 +69,17 @@ const STEP_META: Record<OnboardingStep, StepMeta> = {
     title: "Pick a Whisper model",
     description:
       "Smaller models are faster and lighter; larger ones are more accurate. Base is a great default.",
+  },
+  compute: {
+    eyebrow: { label: "Compute", icon: Zap },
+    title: (
+      <>
+        Where should models <span className="vx-gradient-text">run</span>?
+      </>
+    ),
+    description:
+      "Voxnap auto-detects compute accelerators on your device. NPUs and GPUs run language models faster and use less battery than the CPU.",
+    skippable: true,
   },
   language: {
     eyebrow: { label: "Language", icon: Languages },
@@ -154,6 +166,15 @@ export function OnboardingPage() {
         />
       );
       break;
+    case "compute":
+      body = (
+        <ComputeStep
+          value={onb.choices.computeBackend}
+          onChange={onb.setComputeBackend}
+        />
+      );
+      onSkip = onb.next;
+      break;
     case "language":
       body = (
         <LanguageStep
@@ -189,6 +210,7 @@ export function OnboardingPage() {
           modelId={onb.choices.modelId}
           language={onb.choices.language}
           translate={onb.choices.translateToEnglish}
+          computeBackend={onb.choices.computeBackend}
           aiProvider={onb.choices.aiProvider}
           summaryLength={onb.choices.summaryLength}
           onFinish={handleFinish}
@@ -235,6 +257,7 @@ export function OnboardingPage() {
                 "theme",
                 "microphone",
                 "model",
+                "compute",
                 "language",
                 "ai",
                 "done",

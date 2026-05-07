@@ -26,6 +26,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  AcceleratorInfo,
   AudioDevice,
   AudioLevel,
   EngineConfig,
@@ -38,6 +39,7 @@ import { EngineEmitter, type ITranscriptionEngine } from "./ITranscriptionEngine
 export const TAURI_COMMANDS = {
   init: "voxnap_init",
   listDevices: "voxnap_list_devices",
+  listAccelerators: "voxnap_list_accelerators",
   start: "voxnap_start",
   stop: "voxnap_stop",
   dispose: "voxnap_dispose",
@@ -150,6 +152,28 @@ export class TauriEngine extends EngineEmitter implements ITranscriptionEngine {
       // eslint-disable-next-line no-console
       console.error("[voxnap.tauri] voxnap_list_devices failed:", err);
       throw err;
+    }
+  }
+
+  async listAccelerators(): Promise<AcceleratorInfo[]> {
+    try {
+      return await invoke<AcceleratorInfo[]>(TAURI_COMMANDS.listAccelerators);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[voxnap.tauri] voxnap_list_accelerators failed, falling back to CPU:",
+        err,
+      );
+      // Fallback so the UI can always render something useful even when
+      // the command isn't yet wired (older Rust binary).
+      return [
+        {
+          id: "cpu",
+          label: "CPU",
+          backend: "cpu",
+          available: true,
+        },
+      ];
     }
   }
 

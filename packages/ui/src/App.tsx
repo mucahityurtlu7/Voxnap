@@ -12,6 +12,7 @@ import {
   DEFAULT_MODEL,
   useOnboardingStore,
   useTranscriptionStore,
+  type ComputeBackend,
   type WhisperModelId,
 } from "@voxnap/core";
 
@@ -67,6 +68,9 @@ function Shell() {
   const [vadEnabled, setVadEnabledLocal] = useState<boolean>(
     onboarding.choices.vadEnabled ?? true,
   );
+  const [computeBackend, setComputeBackendLocal] = useState<ComputeBackend>(
+    onboarding.choices.computeBackend ?? "auto",
+  );
   const engine = useEngine();
   const engineState = useTranscriptionStore((s) => s.engineState);
 
@@ -93,6 +97,9 @@ function Shell() {
     setVadEnabledLocal(v);
     useOnboardingStore.getState().setVadEnabled(v);
   }, []);
+  // computeBackend is set via the picker which already writes to the
+  // onboarding store; we just mirror it locally so <LiveTranscribePage />
+  // can re-init the engine when the user changes accelerator preference.
 
   // Once the user finishes onboarding, hydrate the live config with their
   // picks so the first recording uses the model + language they chose.
@@ -103,6 +110,7 @@ function Shell() {
       setTranslateLocal(onboarding.choices.translateToEnglish);
       setVadThresholdLocal(onboarding.choices.vadThreshold);
       setVadEnabledLocal(onboarding.choices.vadEnabled);
+      setComputeBackendLocal(onboarding.choices.computeBackend);
     }
   }, [
     onboarding.completed,
@@ -111,6 +119,7 @@ function Shell() {
     onboarding.choices.translateToEnglish,
     onboarding.choices.vadThreshold,
     onboarding.choices.vadEnabled,
+    onboarding.choices.computeBackend,
   ]);
 
   // Until the user has finished the welcome wizard, render it instead of
@@ -144,6 +153,7 @@ function Shell() {
               translate={translate}
               vadThreshold={vadThreshold}
               vadEnabled={vadEnabled}
+              computeBackend={computeBackend}
             />
           }
         />

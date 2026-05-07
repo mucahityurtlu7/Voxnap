@@ -48,20 +48,56 @@ ringbuf = "0.4"
 whisper-rs = { version = "0.16", default-features = false }
 
 [features]
-# Compile-time switches that map to whisper.cpp's CMake flags. Pick one
-# acceleration backend at build time:
+# Compile-time switches that map to whisper.cpp's CMake flags.
 #
-#   cargo build --features metal      # Apple Silicon
-#   cargo build --features cuda       # NVIDIA
-#   cargo build --features openblas   # CPU (faster matmul)
+# The default set is empty (= pure CPU whisper.cpp) so plain
+# `cargo build` works on any machine without extra toolchains. Real
+# release builds opt into hardware acceleration via the matrix below
+# AND via the target-conditional `[target.…]` blocks at the bottom of
+# this file (which auto-enable Metal/CoreML on Apple platforms).
 #
-# The default feature set keeps things portable: pure CPU whisper.cpp
-# (slow but works everywhere — fine for the initial scaffold).
+# Manual overrides (use these if you build outside CI):
+#
+#   cargo build --features metal       # Apple GPU (auto on macOS)
+#   cargo build --features coreml      # Apple Neural Engine (auto on macOS/iOS)
+#   cargo build --features cuda        # NVIDIA GPU  (Windows/Linux, opt-in)
+#   cargo build --features openblas    # Faster CPU matmul (any OS)
 default = []
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 coreml = ["whisper-rs/coreml"]
 openblas = ["whisper-rs/openblas"]
+
+# ---------------------------------------------------------------------------
+# Target-conditional defaults
+# ---------------------------------------------------------------------------
+#
+# Cargo unions features across `[dependencies]` and any matching
+# `[target.…]` blocks, so adding `features = [...]` to whisper-rs here
+# turns those flags ON automatically when building for that target —
+# without anyone having to pass `--features …` on the CLI.
+#
+# Rationale per platform:
+#
+# • macOS  → Metal + CoreML are *always* present on every supported Mac
+#   (Apple Silicon ships ANE; Intel Macs ship a Metal-capable GPU). The
+#   produced binary still falls back to CPU at runtime if a model lacks
+#   a CoreML encoder, so enabling these features is safe for *all* Macs.
+#
+# • iOS    → CoreML is the only sane path on-device. Always on.
+#
+# • Windows / Linux → CUDA is **not** auto-enabled. A CUDA-linked binary
+#   refuses to start on machines without the NVIDIA driver + CUDA runtime
+#   DLLs, so we ship CUDA as a *separate* "Voxnap-NVIDIA" artifact in CI
+#   (see `.github/workflows/release.yml`). Vanilla Windows/Linux builds
+#   stay pure CPU (works on every machine).
+#
+# • Android → CPU only. No standardised GPU/NPU path in whisper.cpp yet.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", default-features = false, features = ["metal", "coreml"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+whisper-rs = { version = "0.16", default-features = false, features = ["coreml"] }
 
 # Tauri's mobile target needs special handling; this profile is also used
 # from `apps/mobile/src-tauri`.

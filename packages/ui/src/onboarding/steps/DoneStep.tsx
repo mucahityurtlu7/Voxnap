@@ -14,11 +14,13 @@ import {
   Palette,
   Sparkles,
   ArrowRight,
+  Zap,
 } from "lucide-react";
 import {
   AI_PROVIDERS,
   WHISPER_MODELS,
   type AiProvider,
+  type ComputeBackend,
   type OnboardingTheme,
   type SummaryLength,
   type WhisperModelId,
@@ -26,6 +28,7 @@ import {
 
 import { Badge } from "../../components/ui/Badge.js";
 import { Button } from "../../components/ui/Button.js";
+import { useAccelerators } from "../../hooks/useAccelerators.js";
 
 export interface DoneStepProps {
   theme: OnboardingTheme;
@@ -33,6 +36,11 @@ export interface DoneStepProps {
   modelId: WhisperModelId;
   language: string;
   translate: boolean;
+  /**
+   * User's compute-backend preference (`"auto" | "npu" | "gpu" | "cpu"`).
+   * Optional so older callers still typecheck; defaults to `"auto"`.
+   */
+  computeBackend?: ComputeBackend;
   aiProvider: AiProvider;
   summaryLength: SummaryLength;
   onFinish: () => void;
@@ -62,6 +70,7 @@ export function DoneStep({
   modelId,
   language,
   translate,
+  computeBackend = "auto",
   aiProvider,
   summaryLength,
   onFinish,
@@ -69,6 +78,24 @@ export function DoneStep({
   const model = WHISPER_MODELS[modelId];
   const provider = AI_PROVIDERS[aiProvider];
   const langLabel = LANGUAGE_LABELS[language] ?? language;
+  const { accelerators, detected } = useAccelerators();
+
+  // Resolve the user's stored preference into a human-readable runtime
+  // target. "Auto" falls through to whichever NPU/GPU/CPU we'd pick today.
+  const computeValue = (() => {
+    if (computeBackend === "auto") {
+      return detected
+        ? `Auto · ${detected.label}`
+        : "Auto · CPU";
+    }
+    const match = accelerators.find((a) => a.id === computeBackend);
+    if (match) {
+      return match.available
+        ? match.label
+        : `${match.label} (falling back to ${detected?.label ?? "CPU"})`;
+    }
+    return computeBackend.toUpperCase();
+  })();
 
   const items: { icon: typeof Mic; label: string; value: string }[] = [
     {
@@ -88,6 +115,11 @@ export function DoneStep({
       icon: Cpu,
       label: "Model",
       value: `${model.label} · ~${model.approxSizeMb} MB`,
+    },
+    {
+      icon: Zap,
+      label: "Compute",
+      value: computeValue,
     },
     {
       icon: Languages,

@@ -20,6 +20,7 @@ import {
   DEFAULT_MODEL,
   WHISPER_MODELS,
   type AiProvider,
+  type ComputeBackend,
   type SummaryLength,
   type WhisperModelId,
 } from "../types.js";
@@ -31,6 +32,7 @@ export const ONBOARDING_STEPS = [
   "theme",
   "microphone",
   "model",
+  "compute",
   "language",
   "ai",
   "done",
@@ -54,6 +56,11 @@ export interface OnboardingChoices {
   vadThreshold: number;
   /** Whether energy-based VAD is enabled. Default true. */
   vadEnabled: boolean;
+  /**
+   * Where the model should run. `"auto"` lets the engine pick the best
+   * available accelerator (NPU > GPU > CPU). Default `"auto"`.
+   */
+  computeBackend: ComputeBackend;
   aiProvider: AiProvider;
   /** Stored locally only when the chosen provider needs a key. */
   aiApiKey: string;
@@ -85,6 +92,7 @@ export interface OnboardingState extends OnboardingChoices {
   setAiProvider: (p: AiProvider) => void;
   setAiApiKey: (key: string) => void;
   setSummaryLength: (l: SummaryLength) => void;
+  setComputeBackend: (b: ComputeBackend) => void;
 }
 
 const STORAGE_KEY = "voxnap.onboarding.v1";
@@ -103,6 +111,7 @@ const DEFAULTS: OnboardingChoices & {
   translateToEnglish: false,
   vadThreshold: 0.012,
   vadEnabled: true,
+  computeBackend: "auto",
   aiProvider: "mock",
   aiApiKey: "",
   summaryLength: "medium",
@@ -130,6 +139,15 @@ function readState(): OnboardingChoices & {
     )
       ? (parsed.step as OnboardingStep)
       : DEFAULTS.step;
+    // Hardening: any older build (or hand-edited storage) might persist a
+    // compute backend that is no longer in the union; fall back to "auto".
+    const computeBackend: ComputeBackend =
+      parsed.computeBackend === "auto" ||
+      parsed.computeBackend === "cpu" ||
+      parsed.computeBackend === "gpu" ||
+      parsed.computeBackend === "npu"
+        ? parsed.computeBackend
+        : DEFAULTS.computeBackend;
     // Hardening: an older build may have persisted a model id we no longer
     // recognise (e.g. the bogus `medium.q5_1` that doesn't exist on HF).
     // Fall back to DEFAULT_MODEL so the engine doesn't immediately fail
@@ -144,6 +162,7 @@ function readState(): OnboardingChoices & {
       aiProvider: provider,
       step,
       modelId,
+      computeBackend,
     };
 
   } catch {
@@ -168,6 +187,7 @@ function writeState(snapshot: Partial<OnboardingState>): void {
       translateToEnglish,
       vadThreshold,
       vadEnabled,
+      computeBackend,
       aiProvider,
       aiApiKey,
       summaryLength,
@@ -185,6 +205,7 @@ function writeState(snapshot: Partial<OnboardingState>): void {
         translateToEnglish,
         vadThreshold,
         vadEnabled,
+        computeBackend,
         aiProvider,
         aiApiKey,
         summaryLength,
@@ -291,6 +312,11 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => {
     setSummaryLength: (summaryLength) =>
       persistAfter(() => {
         set({ summaryLength });
+      }),
+
+    setComputeBackend: (computeBackend) =>
+      persistAfter(() => {
+        set({ computeBackend });
       }),
   };
 });
