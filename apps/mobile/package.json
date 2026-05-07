@@ -18,20 +18,20 @@
     "test": "echo \"(mobile) test placeholder\""
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.3",
-    "@tauri-apps/plugin-dialog": "^2.0.1",
-    "@tauri-apps/plugin-fs": "^2.0.1",
-    "@tauri-apps/plugin-log": "^2.0.0",
-    "@tauri-apps/plugin-os": "^2.0.0",
-    "@tauri-apps/plugin-shell": "^2.0.1",
-    "@tauri-apps/plugin-store": "^2.1.0",
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-fs": "^2.5.1",
+    "@tauri-apps/plugin-log": "^2.8.0",
+    "@tauri-apps/plugin-os": "^2.3.2",
+    "@tauri-apps/plugin-shell": "^2.3.5",
+    "@tauri-apps/plugin-store": "^2.4.3",
     "@voxnap/core": "workspace:*",
     "@voxnap/ui": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.4",
+    "@tauri-apps/cli": "^2.11.1",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.2",
