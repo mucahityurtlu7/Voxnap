@@ -17,9 +17,21 @@
  *                         picker can still render a CPU-only fallback)
  *   • `refresh()`       — re-run detection (useful after a settings change
  *                         that might affect availability)
+ *   • `diagnose()`      — call the engine's verbose diagnostic so the UI
+ *                         can show *why* an NPU isn't lighting up. Returns
+ *                         `null` when the active engine doesn't expose
+ *                         the diagnostic API (Mock / WASM today).
+ *   • `canDiagnose`     — `true` iff the active engine implements
+ *                         `diagnoseAccelerators`. UI uses this to hide
+ *                         the "Diagnose" button on engines that don't
+ *                         support it.
  */
-import { useCallback, useEffect, useState } from "react";
-import type { AcceleratorInfo, ComputeBackend } from "@voxnap/core";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type {
+  AcceleratorInfo,
+  ComputeBackend,
+  DiagnosticReport,
+} from "@voxnap/core";
 
 import { useEngine } from "../engine/EngineProvider.js";
 
@@ -43,6 +55,13 @@ export interface UseAcceleratorsApi {
   loading: boolean;
   error: string | null;
   refresh: () => void;
+  /** True iff the engine exposes `diagnoseAccelerators`. */
+  canDiagnose: boolean;
+  /**
+   * Run the engine's verbose accelerator diagnostic. Resolves to `null`
+   * when the active engine doesn't expose the API at all (Mock / WASM).
+   */
+  diagnose: () => Promise<DiagnosticReport | null>;
 }
 
 export function useAccelerators(): UseAcceleratorsApi {
@@ -87,14 +106,44 @@ export function useAccelerators(): UseAcceleratorsApi {
     available.find((a) => a.id === "gpu") ??
     null;
 
-  return {
-    accelerators,
-    available,
-    detected,
-    loading,
-    error,
-    refresh: () => void load(),
-  };
+  const canDiagnose = typeof engine.diagnoseAccelerators === "function";
+
+  const diagnose = useCallback(async (): Promise<DiagnosticReport | null> => {
+    if (typeof engine.diagnoseAccelerators !== "function") return null;
+    try {
+      return await engine.diagnoseAccelerators();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[voxnap] diagnoseAccelerators failed:", err);
+      const message = (err as Error)?.message ?? String(err);
+      return {
+        platform: "unknown",
+        compiledFeatures: [],
+        entries: [
+          {
+            id: "diagnose-failed",
+            label: "Diagnostic call failed",
+            status: "failed",
+            detail: message,
+          },
+        ],
+      };
+    }
+  }, [engine]);
+
+  return useMemo(
+    () => ({
+      accelerators,
+      available,
+      detected,
+      loading,
+      error,
+      refresh: () => void load(),
+      canDiagnose,
+      diagnose,
+    }),
+    [accelerators, available, detected, loading, error, load, canDiagnose, diagnose],
+  );
 }
 
 /**

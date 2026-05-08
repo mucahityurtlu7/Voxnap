@@ -165,6 +165,36 @@ export interface AcceleratorInfo {
   unavailableReason?: string;
 }
 
+/**
+ * Status of a single diagnostic probe (compile-features summary, EP probe,
+ * PnP scan row, …). Mirrors `accelerator::DiagnosticStatus` on the Rust
+ * side. The UI uses these to draw colour-coded icons in the "Diagnose
+ * NPU" modal.
+ */
+export type DiagnosticStatus = "ok" | "skipped" | "failed" | "info";
+
+export interface DiagnosticEntry {
+  /** Stable id (`compile-features`, `directml-probe`, `pnp-scan`, …). */
+  id: string;
+  label: string;
+  status: DiagnosticStatus;
+  /** Free-form detail; usually the underlying error message or success note. */
+  detail: string;
+}
+
+/**
+ * Output of `engine.diagnoseAccelerators()`. The UI renders one row per
+ * `entries[i]` so the user can see *exactly* why an NPU/GPU is or isn't
+ * lighting up — instead of an opaque "Unavailable" badge.
+ */
+export interface DiagnosticReport {
+  /** `os/arch` string, e.g. `"windows/x86_64"`. */
+  platform: string;
+  /** Cargo features that were compiled into the running binary. */
+  compiledFeatures: string[];
+  entries: DiagnosticEntry[];
+}
+
 export interface EngineConfig {
   modelId: WhisperModelId;
   /** Override model file location (Tauri only). If unset, engine picks default. */

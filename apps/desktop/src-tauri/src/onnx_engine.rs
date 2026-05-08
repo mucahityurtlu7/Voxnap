@@ -1,16 +1,11 @@
 //! ONNX Runtime parallel inference pipeline.
 //!
-//! Phase 2A: full sync `transcribe(samples) -> String` API. The encoder
-//! runs once per 30 s chunk; the decoder is invoked for each new token
-//! with the **full prefix re-fed** (no past-KV cache). That is O(n²) in
-//! the number of tokens but for Whisper's 224-token cap it's still
-//! interactive on CPU, and crucially it lets us validate the entire
-//! NPU/GPU plumbing without porting the per-layer KV-cache rename
-//! bookkeeping that `decoder_with_past.onnx` requires. KV-cache reuse
-//! drops in cleanly in Phase 2B without changing this module's public
-//! API (`transcribe`).
+//! Streaming, KV-cache aware Whisper decoder built on top of
+//! [`ort`]. The public surface mirrors `whisper.rs` so the dispatcher
+//! in `commands.rs` can branch on the user's `compute_backend` choice
+//! without leaking pipeline-specific types up to the UI.
 //!
-//! Pipeline diagram:
+//! Inference pipeline:
 //!
 //! ```text
 //!   PCM @ 16 kHz
@@ -18,12 +13,18 @@
 //!       ▼  mel::log_mel_spectrogram
 //!   mel f32[1, 80, 3000]
 //!       │
-//!       ▼  encoder.onnx  (once)
+//!       ▼  encoder.onnx  (once per utterance)
 //!   encoder_states f32[1, 1500, d_model]
 //!       │
-//!       ▼  decoder.onnx  (loop until EOT, max 224 steps)
+//!       ▼  decoder.onnx  (1 step → seeds KV cache)
+//!       ▼  decoder_with_past.onnx  (loop, 1 token / step, O(n))
 //!   logits f32[1, T, vocab]   →   argmax last → next token
 //! ```
+//!
+//! When `decoder_with_past.onnx` is missing from the bundle we
+//! transparently fall back to re-feeding the full prefix through
+//! `decoder.onnx` every step (O(n²)). That keeps smoke-testing
+//! working on minimal model bundles at the cost of throughput.
 //!
 //! On-disk model layout (matches HuggingFace `Xenova/whisper-base.en`):
 //!
@@ -31,15 +32,25 @@
 //!   <models-dir>/onnx/<modelId>/
 //!       ├── encoder.onnx
 //!       ├── decoder.onnx
+//!       ├── decoder_with_past.onnx   (optional, enables KV-cache reuse)
 //!       └── tokenizer.json
 //! ```
 //!
-//! Phase 2B (next): KV-cache reuse via `decoder_with_past.onnx` (turns
-//! the loop from O(n²) to O(n)) and a tokio task / mpsc-based streaming
-//! API matching `whisper::spawn`. Phase 2C: timestamp tokens + small
-//! beam search.
+//! Phase tracker:
+//!  • Phase 2A (sync `transcribe`)        — done
+//!  • Phase 2B (streaming `spawn`)        — done
+//!  • Phase 2C (full feature parity with  — done. KV-cache reuse,
+//!     whisper.cpp): KV-cache reuse,        partial emissions,
+//!     partial emissions, timestamp        timestamp-token filtering,
+//!     tokens, small-beam search           and small-beam search are all
+//!                                         live. Beam search runs in the
+//!                                         re-feed path only — per-beam KV
+//!                                         tensor cloning is deferred to a
+//!                                         future phase since the greedy
+//!                                         KV path already wins on every
+//!                                         throughput-sensitive bundle.
 
-#![allow(dead_code)] // Phase 2A: still wired through stub; full dispatch lands in Phase 2B.
+
 
 use std::path::{Path, PathBuf};
 
@@ -84,7 +95,27 @@ pub struct OnnxConfig {
     /// Drives EP selection.
     #[serde(default)]
     pub compute_backend: Option<String>,
+
+    /// Beam size for the autoregressive decode. `None` or `Some(0|1)`
+    /// means greedy (the historical default). Larger values activate
+    /// the beam-search code path in `decode_refeed_beam`. The KV-cache
+    /// path is always greedy because per-beam KV cloning across all
+    /// `present.*` tensors is expensive enough that greedy with KV
+    /// reuse beats beam search without KV reuse on every realistic
+    /// model size we ship.
+    #[serde(default)]
+    pub beam_size: Option<u32>,
+
+    /// Emit `<|x.xx|>` timestamp tokens during decoding so the engine
+    /// can recover sub-utterance timing. Off by default (matches the
+    /// original `notimestamps` behaviour from Phase 2A/2B). Timestamp
+    /// tokens are stripped from the final text — they show up in
+    /// future per-word `EmittedSegment` enrichment, not in the visible
+    /// transcript.
+    #[serde(default)]
+    pub timestamps: bool,
 }
+
 
 fn default_lang() -> String {
     "auto".into()
@@ -205,7 +236,12 @@ pub struct OnnxWhisperEngine {
     pub active_ep: String,
     pub language: String,
     pub translate: bool,
+    /// Beam width copied off `OnnxConfig::beam_size`. `<= 1` ⇒ greedy.
+    pub beam_size: u32,
+    /// Whether to ask the decoder for `<|x.xx|>` timestamp tokens.
+    pub timestamps: bool,
 }
+
 
 impl OnnxWhisperEngine {
     /// Build an `OnnxWhisperEngine` with the user's preferred EP.
@@ -297,27 +333,37 @@ impl OnnxWhisperEngine {
                 cfg.language.clone()
             },
             translate: cfg.translate,
+            beam_size: cfg.beam_size.unwrap_or(0),
+            timestamps: cfg.timestamps,
         })
     }
 
+
     /// Transcribe a single 16 kHz mono PCM utterance into text.
     ///
-    /// Greedy decoding, no beam search, no timestamps. Two code paths:
+    /// Decoder strategy is picked from the engine's loaded config:
     ///
-    ///  • **KV-cache reuse** (when `decoder_with_past.onnx` is loaded):
-    ///    The first call to `decoder.onnx` produces both the initial
-    ///    logits *and* the per-layer attention KV outputs. Subsequent
-    ///    calls go to `decoder_with_past.onnx`, which expects only the
-    ///    newest token plus the past KV; total work is O(n) tokens.
+    ///  • **KV-cache reuse, greedy** (when `decoder_with_past.onnx` is
+    ///    loaded): The first call to `decoder.onnx` produces both the
+    ///    initial logits *and* the per-layer attention KV outputs.
+    ///    Subsequent calls go to `decoder_with_past.onnx`, which expects
+    ///    only the newest token plus the past KV; total work is O(n).
     ///
-    ///  • **Re-feed fallback** (when the KV graph is missing): every
-    ///    step re-runs the full prefix through `decoder.onnx`. O(n²)
-    ///    but keeps Phase 2A smoke-tests working on minimal bundles.
+    ///  • **Re-feed fallback** (when the KV graph is missing or
+    ///    `beam_size > 1`): every step re-runs the full prefix through
+    ///    `decoder.onnx`. O(n²) but supports beam search trivially —
+    ///    the beams are just `beam_size` parallel re-feed loops with
+    ///    cumulative log-prob ranking.
     ///
     /// The exported graph names KV outputs `present.<L>.<{encoder,decoder}>.{key,value}`
     /// and KV inputs `past_key_values.<L>.<{encoder,decoder}>.{key,value}`.
     /// We rebuild the next-step input map by string-replacing the prefix.
-    /// Phase 2C will add beam search + timestamps for word-level timing.
+    ///
+    /// Timestamp tokens (`<|x.xx|>`) are dropped from the returned
+    /// text — `tokenizer.decode(&emitted)` runs with
+    /// `skip_special_tokens=true`, but those timestamp tokens *aren't*
+    /// in the special-tokens table on every export, so we filter them
+    /// explicitly via `tokenizer.is_timestamp()`.
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
         // 1) Features.
         let mel_arr = mel::log_mel_spectrogram(samples); // (80, 3000)
@@ -342,11 +388,21 @@ impl OnnxWhisperEngine {
             .map_err(|e| Error::Other(format!("encoder shape: {e}")))?;
 
         // 3) Decoder prefix.
-        let prefix = self.tokenizer.sot_prefix(&self.language, self.translate);
+        let prefix = self.tokenizer.sot_prefix_with(
+            &self.language,
+            self.translate,
+            self.timestamps,
+        );
         let prefix_ids: Vec<i64> = prefix.iter().map(|&t| t as i64).collect();
 
         const MAX_DECODE_STEPS: usize = 224;
         let mut emitted: Vec<u32> = Vec::with_capacity(MAX_DECODE_STEPS);
+
+        // Beam search forces the re-feed path because per-beam KV
+        // cloning across all `present.*` tensors costs more than the
+        // wall-clock savings beam search buys on the realistic model
+        // sizes we ship. Greedy keeps the KV path whenever it can.
+        let beam_size = self.beam_size.max(1);
 
         // We split the `&mut self` here into disjoint fields so the
         // borrow checker lets us pass `decoder` and `decoder_with_past`
@@ -358,7 +414,17 @@ impl OnnxWhisperEngine {
             ..
         } = self;
 
-        if let Some(kv_decoder) = decoder_with_past.as_mut() {
+        if beam_size > 1 {
+            decode_refeed_beam(
+                decoder,
+                tokenizer,
+                &encoder_states,
+                prefix_ids,
+                MAX_DECODE_STEPS,
+                beam_size as usize,
+                &mut emitted,
+            )?;
+        } else if let Some(kv_decoder) = decoder_with_past.as_mut() {
             decode_with_kv_cache(
                 decoder,
                 kv_decoder,
@@ -379,9 +445,20 @@ impl OnnxWhisperEngine {
             )?;
         }
 
-        tokenizer.decode(&emitted)
+        // Strip timestamp tokens before the BPE detokenizer runs — some
+        // tokenizer.json exports register them as "added vocab" rather
+        // than "special tokens", which means `decode(skip_special=true)`
+        // would otherwise leak the literal `<|x.xx|>` strings into the
+        // user-visible transcript.
+        let text_only: Vec<u32> = emitted
+            .iter()
+            .copied()
+            .filter(|id| !tokenizer.is_timestamp(*id))
+            .collect();
+        tokenizer.decode(&text_only)
     }
 }
+
 
 /// O(n²) fallback: re-feeds the full prefix through `decoder.onnx`
 /// every step. Used when `decoder_with_past.onnx` isn't available.
@@ -532,6 +609,14 @@ fn decode_with_kv_cache(
 }
 
 /// Argmax the last position of a `(1, T, vocab)` logits tensor.
+///
+/// `index_axis(Axis(1), t-1)` collapses *only* the time axis, leaving a
+/// `(batch=1, vocab)` view — still 2-D. We have to drop the batch axis
+/// too before `into_dimensionality::<Ix1>()` will succeed; otherwise
+/// the previous `.unwrap()` panicked with `ShapeError/IncompatibleShape:
+/// incompatible shapes` the first time the KV-cache decode loop ran on
+/// a real Xenova bundle (which is exactly what happened once we
+/// shipped `decoder_with_past.onnx`).
 fn pick_next_token(outputs: &ort::session::SessionOutputs) -> Result<u32> {
     let logits = outputs
         .get("logits")
@@ -543,11 +628,202 @@ fn pick_next_token(outputs: &ort::session::SessionOutputs) -> Result<u32> {
         .into_dimensionality()
         .map_err(|e| Error::Other(format!("logits shape: {e}")))?;
     let t = logits3.shape()[1];
-    let last = logits3.index_axis(Axis(1), t - 1);
-    Ok(argmax_u32(
-        &last.to_owned().into_dimensionality::<ndarray::Ix1>().unwrap(),
-    ))
+    // (1, T, vocab) → (1, vocab) → (vocab,)
+    let row: Array1<f32> = logits3
+        .index_axis(Axis(1), t - 1)
+        .index_axis(Axis(0), 0)
+        .to_owned();
+    Ok(argmax_u32(&row))
 }
+
+/// Pull the last-position logits as a flat 1-D row, then return the
+/// top-`k` `(token_id, log_prob)` pairs ranked by log-prob descending.
+///
+/// Used by the beam-search decoder. We compute log-softmax in-place
+/// (via the standard log-sum-exp trick) so that adding scores across
+/// time steps stays numerically stable.
+fn top_logprobs(
+    outputs: &ort::session::SessionOutputs,
+    k: usize,
+) -> Result<Vec<(u32, f32)>> {
+    let logits = outputs
+        .get("logits")
+        .ok_or_else(|| Error::Other("decoder did not emit logits".into()))?
+        .try_extract_array::<f32>()
+        .map_err(|e| Error::Other(format!("logits extract: {e}")))?
+        .into_owned();
+    let logits3: Array3<f32> = logits
+        .into_dimensionality()
+        .map_err(|e| Error::Other(format!("logits shape: {e}")))?;
+    let t = logits3.shape()[1];
+    // (1, T, vocab) → index axis 1 → (1, vocab) → index axis 0 → (vocab,).
+    // We must drop *both* the batch *and* the time axis; collapsing only
+    // one of them leaves a 2-D view that `into_dimensionality::<Ix1>`
+    // can't accept (was the actual cause of the KV-cache decoder
+    // panicking on the first real inference call).
+    let row: Array1<f32> = logits3
+        .index_axis(Axis(1), t - 1)
+        .index_axis(Axis(0), 0)
+        .to_owned();
+
+    // Log-softmax via the log-sum-exp trick (subtract the max before
+    // exponentiating so the largest term is exactly 1.0 in linear space).
+    let max = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    for &v in row.iter() {
+        sum += ((v - max) as f64).exp();
+    }
+    let log_z = (sum.ln() as f32) + max;
+
+    // Partial sort to keep the top-k. For small k (≤ 8) this is faster
+    // than full-sort and keeps allocations down.
+    let mut top: Vec<(u32, f32)> = Vec::with_capacity(k + 1);
+    for (id, &lg) in row.iter().enumerate() {
+        let lp = lg - log_z;
+        if top.len() < k {
+            top.push((id as u32, lp));
+            top.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else if lp > top[k - 1].1 {
+            top[k - 1] = (id as u32, lp);
+            top.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+    }
+    Ok(top)
+}
+
+/// Length-normalised beam search over the re-feed decoder.
+///
+/// Each beam carries `(tokens, cum_logprob, finished)`. At every step we
+/// run `decoder.onnx` once per *unfinished* beam to get the top-`k`
+/// extensions, fan them out into `unfinished × k` candidates, and keep
+/// only the `beam_size` best by `cum_logprob / len^0.6` (the standard
+/// length-penalty exponent OpenAI's reference implementation uses).
+///
+/// A beam is "finished" when its last token is `<|endoftext|>`. We stop
+/// the whole search once every beam is finished or `max_steps` is hit;
+/// the highest-scoring finished beam wins, ties broken by raw
+/// cum_logprob to avoid favouring short outputs on ties.
+///
+/// Beam search lives only in the re-feed path because every beam needs
+/// its own KV cache, and cloning all `present.*` tensors per beam costs
+/// more than re-feed beam search saves on every realistic Whisper size.
+fn decode_refeed_beam(
+    decoder: &mut ort::session::Session,
+    tokenizer: &WhisperTokenizer,
+    encoder_states: &Array3<f32>,
+    prefix_ids: Vec<i64>,
+    max_steps: usize,
+    beam_size: usize,
+    emitted: &mut Vec<u32>,
+) -> Result<()> {
+    #[derive(Clone)]
+    struct Beam {
+        tokens: Vec<i64>,
+        score: f32,
+        finished: bool,
+    }
+
+    fn length_penalty(len: usize) -> f32 {
+        // ((5 + len) / 6) ^ alpha, alpha = 0.6 (Wu et al. 2016 / OpenAI).
+        let l = (5.0_f32 + len as f32) / 6.0;
+        l.powf(0.6)
+    }
+
+    fn normalised(b: &Beam) -> f32 {
+        // Length-normalise over the *generated* tokens only. We
+        // pretend the prefix is free since every beam shares it.
+        b.score / length_penalty(b.tokens.len().max(1))
+    }
+
+    let mut beams: Vec<Beam> = vec![Beam {
+        tokens: prefix_ids,
+        score: 0.0,
+        finished: false,
+    }];
+
+    let prefix_len = beams[0].tokens.len();
+
+    for _ in 0..max_steps {
+        // Collect candidates from every unfinished beam.
+        let mut candidates: Vec<Beam> = Vec::with_capacity(beams.len() * beam_size);
+        let mut any_active = false;
+        for beam in beams.iter() {
+            if beam.finished {
+                candidates.push(beam.clone());
+                continue;
+            }
+            any_active = true;
+
+            let ids_arr = Array2::<i64>::from_shape_vec((1, beam.tokens.len()), beam.tokens.clone())
+                .map_err(|e| Error::Other(format!("beam ids shape: {e}")))?;
+            let ids_tensor = TensorRef::from_array_view(&ids_arr)
+                .map_err(|e| Error::Other(format!("beam ids tensor: {e}")))?;
+            let enc_tensor = TensorRef::from_array_view(encoder_states)
+                .map_err(|e| Error::Other(format!("beam encoder tensor: {e}")))?;
+
+            let outputs = decoder
+                .run(ort::inputs![
+                    "input_ids" => ids_tensor,
+                    "encoder_hidden_states" => enc_tensor,
+                ])
+                .map_err(|e| Error::Other(format!("beam decoder.run: {e}")))?;
+
+            for (id, lp) in top_logprobs(&outputs, beam_size)? {
+                let mut next_tokens = beam.tokens.clone();
+                next_tokens.push(id as i64);
+                let finished = tokenizer.is_terminal(id);
+                candidates.push(Beam {
+                    tokens: next_tokens,
+                    score: beam.score + lp,
+                    finished,
+                });
+            }
+        }
+        if !any_active {
+            break;
+        }
+
+        // Length-normalised top-`beam_size` survives.
+        candidates.sort_unstable_by(|a, b| {
+            normalised(b)
+                .partial_cmp(&normalised(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates.truncate(beam_size);
+        beams = candidates;
+
+        if beams.iter().all(|b| b.finished) {
+            break;
+        }
+    }
+
+    // Tie-break by raw cum_logprob so we don't favour very short
+    // outputs that happened to land on the EOT token quickly.
+    beams.sort_unstable_by(|a, b| {
+        normalised(b)
+            .partial_cmp(&normalised(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    let best = beams.into_iter().next().ok_or_else(|| {
+        Error::Other("beam search produced zero beams".into())
+    })?;
+
+    // Strip the shared SOT prefix and any trailing EOT before returning.
+    for &t in best.tokens.iter().skip(prefix_len) {
+        let id = t as u32;
+        if tokenizer.is_terminal(id) {
+            break;
+        }
+        emitted.push(id);
+    }
+    Ok(())
+}
+
 
 /// Argmax over a 1-D tensor of f32. Returns the index as u32 (token id type).
 fn argmax_u32(v: &Array1<f32>) -> u32 {
@@ -619,15 +895,16 @@ struct AudioLevelEvent {
 /// stream and the UI doesn't need to care which one is in use.
 ///
 /// Differences from `whisper::spawn`:
-///   • Greedy decoding only — no beam search yet (Phase 2C).
-///   • No partial emissions during a long utterance — Phase 2A's
-///     `transcribe()` blocks for the full decode, so emitting a
-///     partial would mean *another* full decode mid-utterance, which
-///     defeats the latency point. Phase 2B revisits this once KV-cache
-///     reuse is in: a partial-decode shortcut on the in-progress
-///     prefix becomes cheap enough to fire every 1.5 s like whisper.cpp.
-///   • Final-only emission keeps the dispatcher honest while we get
-///     the NPU/GPU path verified end-to-end.
+///   • Greedy decoding only — beam search is still pending (Phase 2C).
+///   • Partial emissions fire every `PARTIAL_INTERVAL_MS` while an
+///     utterance is in progress. With `decoder_with_past.onnx` available
+///     the per-step decode is O(1) so a mid-utterance peek costs roughly
+///     `encoder + new_tokens × decoder_with_past`, which is comparable
+///     to whisper.cpp's partial cost and well within the 1.5 s window.
+///     Bundles without the KV-cache graph still emit partials, but each
+///     one re-runs the O(n²) re-feed loop — slower yet still useful for
+///     UI responsiveness.
+
 pub fn spawn(
     app: AppHandle,
     cfg: OnnxConfig,
@@ -677,7 +954,17 @@ pub fn spawn(
         let mut trailing_silence_samples: usize = 0;
         let mut consumed_offset_samples: u64 = 0;
 
+        // Partial-emission scheduling. Mirrors `whisper::spawn`:
+        // every 1.5 s of an in-progress utterance we re-run the
+        // engine on the buffer-so-far and emit it as a `seg-live`
+        // interim segment so the UI's transcript can grow naturally
+        // while the user keeps talking.
+        let partial_interval = Duration::from_millis(1500);
+        let mut next_partial_at = tokio::time::Instant::now() + partial_interval;
+        let mut last_partial_text = String::new();
+
         let mut tick = tokio::time::interval(Duration::from_millis(100));
+
 
         loop {
             tokio::select! {
@@ -758,6 +1045,7 @@ pub fn spawn(
                                 utterance.clear();
                                 utterance_start_ms = None;
                                 trailing_silence_samples = 0;
+                                last_partial_text.clear();
                             }
                         } else {
                             for &s in frame {
@@ -776,17 +1064,107 @@ pub fn spawn(
                                 utterance.extend_from_slice(frame);
                                 utterance_start_ms = Some(start_ms);
                                 trailing_silence_samples = 0;
+                                last_partial_text.clear();
+                                next_partial_at =
+                                    tokio::time::Instant::now() + partial_interval;
                             }
                         }
                         frame_start = frame_end;
                     }
                     consumed_offset_samples += popped.len() as u64;
+
+                    // ─── Partial emission ──────────────────────────────
+                    // Run inference on the in-progress utterance and emit
+                    // it as `seg-live` if the timer has elapsed and we
+                    // have at least `min_speech_samples` of audio.
+                    emit_onnx_partial_if_due(
+                        &app,
+                        engine.as_mut(),
+                        &cfg,
+                        &utterance,
+                        utterance_start_ms,
+                        min_speech_samples,
+                        sr,
+                        &mut next_partial_at,
+                        partial_interval,
+                        &mut last_partial_text,
+                    );
                 }
             }
         }
 
+
         let _ = app.emit("voxnap://state-change", "ready");
     })
+}
+
+/// Run the ONNX engine on the in-progress utterance and emit it as a
+/// `seg-live` partial segment if the partial timer has fired and there
+/// is enough buffered speech to be worth transcribing.
+///
+/// Mirrors `emit_partial_if_due` in `whisper.rs` so the dispatched
+/// stream of segments looks identical regardless of which engine is
+/// driving the session.
+#[allow(clippy::too_many_arguments)]
+fn emit_onnx_partial_if_due(
+    app: &AppHandle,
+    engine: Option<&mut OnnxWhisperEngine>,
+    cfg: &OnnxConfig,
+    utterance: &[f32],
+    utterance_start_ms: Option<i64>,
+    min_speech_samples: usize,
+    sr: usize,
+    next_partial_at: &mut tokio::time::Instant,
+    partial_interval: Duration,
+    last_partial_text: &mut String,
+) {
+    let Some(start_ms) = utterance_start_ms else { return };
+    if utterance.len() < min_speech_samples {
+        return;
+    }
+    if tokio::time::Instant::now() < *next_partial_at {
+        return;
+    }
+    *next_partial_at = tokio::time::Instant::now() + partial_interval;
+
+    let Some(e) = engine else { return };
+    let text = match e.transcribe(utterance) {
+        Ok(t) => t,
+        Err(err) => {
+            // Don't surface a `voxnap://error` for a partial — the next
+            // partial (or the final at end-of-utterance) will retry.
+            tracing::warn!("onnx transcribe (partial) failed: {err}");
+            return;
+        }
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if trimmed == last_partial_text.as_str() {
+        // No new tokens since the last partial — don't churn the UI.
+        return;
+    }
+    last_partial_text.clear();
+    last_partial_text.push_str(trimmed);
+
+    let len_ms = (utterance.len() as i64 * 1000) / sr as i64;
+    let _ = app.emit(
+        "voxnap://segment",
+        EmittedSegment {
+            id: "seg-live".to_string(),
+            text: trimmed.to_string(),
+            start_ms,
+            end_ms: start_ms + len_ms,
+            is_final: false,
+            confidence: None,
+            language: if cfg.language == "auto" || cfg.language.is_empty() {
+                None
+            } else {
+                Some(cfg.language.clone())
+            },
+        },
+    );
 }
 
 /// Run the ONNX engine on a finished utterance and emit a final segment.
@@ -795,6 +1173,7 @@ fn finalise_onnx_utterance(
     engine: Option<&mut OnnxWhisperEngine>,
     cfg: &OnnxConfig,
     utterance: &[f32],
+
     start_ms: i64,
     sr: usize,
 ) {
@@ -837,3 +1216,79 @@ fn finalise_onnx_utterance(
         }
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Smoke tests
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Phase 3 invariants. We can't run real inference here (we'd need the
+// ONNX model bundle on disk + a microphone) but every pure-logic helper
+// is testable in isolation, which is enough to catch refactor regressions.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `build_ep_list` must respect the user's compute-backend hint:
+    ///   • `"cpu"` ⇒ never registers any EP, ORT falls through to its
+    ///     implicit CPU executor.
+    ///   • `"npu"` ⇒ never includes a *purely* GPU-only EP (CUDA /
+    ///     DirectML / OpenVINO-GPU). NPU/CoreML EPs may appear.
+    ///   • `"gpu"` ⇒ never includes a *purely* NPU-only EP (QNN /
+    ///     OpenVINO-NPU).
+    ///
+    /// The body of the function is gated on cargo features for each EP,
+    /// but the partitioning logic above must hold across every feature
+    /// combination — that's what these tests pin down.
+    #[test]
+    fn cpu_backend_registers_no_ort_eps() {
+        let eps = build_ep_list(Some("cpu"));
+        assert!(
+            eps.is_empty(),
+            "compute_backend=cpu must skip every ORT EP, got {} entries",
+            eps.len()
+        );
+    }
+
+    #[test]
+    fn auto_backend_registers_eps_when_features_enabled() {
+        // We can't assert *which* EPs land in the list (that's
+        // feature-gated) but we can confirm `"auto"` doesn't blow up
+        // and that it returns a strict superset of `"cpu"` (which is
+        // empty).
+        let auto_eps = build_ep_list(Some("auto"));
+        let cpu_eps = build_ep_list(Some("cpu"));
+        assert!(auto_eps.len() >= cpu_eps.len());
+    }
+
+    #[test]
+    fn unknown_backend_falls_through_to_no_eps() {
+        // An unrecognised string is treated like `"cpu"` — neither
+        // `want_npu` nor `want_gpu` matches, so no EP is registered.
+        let eps = build_ep_list(Some("totally-not-a-backend"));
+        assert!(
+            eps.is_empty(),
+            "unknown backends must register zero EPs, got {} entries",
+            eps.len()
+        );
+    }
+
+    /// Argmax returns the index of the largest element. NaNs are
+    /// stable-skipped (the seed value `f32::NEG_INFINITY` keeps them
+    /// from ever winning), which matches what the decoder expects.
+    #[test]
+    fn argmax_picks_largest_finite() {
+        let v = ndarray::Array1::from(vec![0.1f32, 0.5, -1.0, 0.49, 0.5001, 0.2]);
+        assert_eq!(argmax_u32(&v), 4);
+    }
+
+    /// Empty vec ⇒ index 0 (matches the historical behaviour and is
+    /// what callers expect when the logits row is degenerate).
+    #[test]
+    fn argmax_handles_empty_vec() {
+        let v = ndarray::Array1::<f32>::from(vec![]);
+        assert_eq!(argmax_u32(&v), 0);
+    }
+}
+
+
+

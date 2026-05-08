@@ -44,7 +44,13 @@ pub struct WhisperSpecials {
     /// First language-tag id (English). The other 99 follow contiguously
     /// in the same order as `LANGUAGE_CODES`.
     pub lang_base: u32,
+    /// First timestamp-token id (`<|0.00|>`). Subsequent timestamp tokens
+    /// `<|0.02|>`, `<|0.04|>`, … run contiguously up to `<|30.00|>`. Used
+    /// to detect timestamp tokens emitted by the decoder so the engine
+    /// can recover word-level timing in Phase 2C+.
+    pub timestamp_begin: u32,
 }
+
 
 /// 99 + 1 BCP-47 codes Whisper supports, ordered to match its vocab.
 /// Index `i` corresponds to token id `lang_base + i`.
@@ -84,6 +90,26 @@ impl WhisperTokenizer {
                 .ok_or_else(|| Error::Other(format!("missing special token `{tok}` in vocab")))
         };
 
+        // The first timestamp token is `<|0.00|>`. Different optimum
+        // exports format it as `<|0.00|>` (most common) or `<|0|>`
+        // (legacy). We try both before giving up — if neither is
+        // present the model bundle was exported without timestamp
+        // support, which is fine: callers stick with notimestamps.
+        let timestamp_begin = inner
+            .token_to_id("<|0.00|>")
+            .or_else(|| inner.token_to_id("<|0|>"))
+            // Falls back to one past `notimestamps`, matching OpenAI's
+            // canonical layout. Wrong answers from this branch are
+            // harmless because `is_timestamp()` only ever returns true
+            // for ids ≥ this value, so the worst case is timestamp
+            // detection silently degrading to "no timestamps observed".
+            .unwrap_or_else(|| {
+                inner
+                    .token_to_id("<|notimestamps|>")
+                    .map(|n| n + 1)
+                    .unwrap_or(u32::MAX)
+            });
+
         let specials = WhisperSpecials {
             eot: resolve("<|endoftext|>")?,
             sot: resolve("<|startoftranscript|>")?,
@@ -92,7 +118,9 @@ impl WhisperTokenizer {
             notimestamps: resolve("<|notimestamps|>")?,
             no_speech: resolve("<|nospeech|>").unwrap_or(0),
             lang_base: resolve("<|en|>")?,
+            timestamp_begin,
         };
+
 
         Ok(Self {
             inner,
@@ -113,14 +141,34 @@ impl WhisperTokenizer {
 
     /// Build the start-of-transcript prefix the decoder is conditioned on.
     ///
-    ///  • Multilingual: `[SOT, <|lang|>, <|transcribe|or|translate|>, <|notimestamps|>]`
-    ///  • English-only: `[SOT, <|notimestamps|>]`  (lang + task are baked in)
+    /// `timestamps = false` (the default in earlier phases) appends
+    /// `<|notimestamps|>` so the decoder produces only text tokens.
+    /// `timestamps = true` omits that marker — the decoder will then
+    /// interleave `<|x.xx|>` timestamp tokens between text spans, which
+    /// the engine slices into segments via `is_timestamp` /
+    /// `timestamp_seconds`.
     ///
-    /// Timestamps are *disabled* in Phase 2B for simplicity. Phase 2C will
-    /// add timestamp tokens so we can recover word-level timing.
+    ///  • Multilingual + timestamps: `[SOT, <|lang|>, <|task|>]`
+    ///  • Multilingual + notimestamps: `[SOT, <|lang|>, <|task|>, <|notimestamps|>]`
+    ///  • English-only + timestamps:  `[SOT]`
+    ///  • English-only + notimestamps: `[SOT, <|notimestamps|>]`
     pub fn sot_prefix(&self, language: &str, translate: bool) -> Vec<u32> {
+        self.sot_prefix_with(language, translate, false)
+    }
+
+    /// Same as [`sot_prefix`] but lets the caller opt into timestamp tokens.
+    pub fn sot_prefix_with(
+        &self,
+        language: &str,
+        translate: bool,
+        timestamps: bool,
+    ) -> Vec<u32> {
         if self.english_only {
-            return vec![self.specials.sot, self.specials.notimestamps];
+            return if timestamps {
+                vec![self.specials.sot]
+            } else {
+                vec![self.specials.sot, self.specials.notimestamps]
+            };
         }
         let lang = self.language_token(language);
         let task = if translate {
@@ -128,7 +176,11 @@ impl WhisperTokenizer {
         } else {
             self.specials.transcribe
         };
-        vec![self.specials.sot, lang, task, self.specials.notimestamps]
+        if timestamps {
+            vec![self.specials.sot, lang, task]
+        } else {
+            vec![self.specials.sot, lang, task, self.specials.notimestamps]
+        }
     }
 
     /// Decode a token sequence into a UTF-8 string, dropping any special
@@ -144,4 +196,25 @@ impl WhisperTokenizer {
     pub fn is_terminal(&self, id: u32) -> bool {
         id == self.specials.eot
     }
+
+    /// True if `id` is one of the `<|x.xx|>` timestamp tokens.
+    pub fn is_timestamp(&self, id: u32) -> bool {
+        id >= self.specials.timestamp_begin && id < self.specials.eot
+    }
+
+    /// Convert a timestamp token id into its seconds value (0.00 … 30.00).
+    /// Returns `None` for ids that are not timestamps.
+    ///
+    /// Whisper's timestamp tokens are spaced at 20 ms intervals
+    /// (`<|0.00|>`, `<|0.02|>`, `<|0.04|>`, …), so the seconds value is
+    /// `(id − timestamp_begin) × 0.02`.
+    pub fn timestamp_seconds(&self, id: u32) -> Option<f32> {
+        if !self.is_timestamp(id) {
+            return None;
+        }
+        let offset = id - self.specials.timestamp_begin;
+        Some(offset as f32 * 0.02)
+    }
 }
+
+

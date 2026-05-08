@@ -10,6 +10,7 @@ import type {
   AcceleratorInfo,
   AudioDevice,
   AudioLevel,
+  DiagnosticReport,
   EngineConfig,
   EngineError,
   EngineState,
@@ -52,6 +53,17 @@ export interface ITranscriptionEngine {
    * leave this undefined; the UI then falls back to a static "CPU" entry.
    */
   listAccelerators?(): Promise<AcceleratorInfo[]>;
+
+  /**
+   * Verbose diagnostic for the accelerator pipeline. Powers the "Diagnose
+   * NPU" UI: returns one row per probed channel (compile-features, EP
+   * probes, OS-level NPU PnP scan, …) with status + free-form detail so
+   * the user can actually act on a failed detection.
+   *
+   * Optional — engines that don't ship a hardware-detection layer (mock
+   * / WASM) leave this undefined and the UI hides the diagnose button.
+   */
+  diagnoseAccelerators?(): Promise<DiagnosticReport>;
 
   /**
    * Begin capturing audio and emitting segments.

@@ -66,6 +66,7 @@ pub fn run() {
             commands::voxnap_dispose,
             commands::voxnap_list_devices,
             commands::voxnap_list_accelerators,
+            commands::voxnap_diagnose_accelerators,
             commands::voxnap_list_models,
             commands::voxnap_models_dir,
             commands::voxnap_download_model,

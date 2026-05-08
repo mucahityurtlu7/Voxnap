@@ -1,0 +1,167 @@
+name: CI
+
+# Phase 3 — per-EP smoke tests for the desktop crate.
+#
+# Two jobs:
+#
+#   • `lints` — runs `cargo fmt --check` + `cargo clippy` on the host
+#     defaults so plain-old `cargo build` regressions get caught before
+#     they reach `release.yml`.
+#
+#   • `smoke` — compiles every `ort-*` cargo feature in isolation, plus
+#     `ort-all`, plus the legacy whisper.cpp `cuda` flag. For each feature
+#     combination we run the unit-test suite (`cargo test --lib`); the
+#     tests in `accelerator.rs`, `commands.rs` and `onnx_engine.rs`
+#     enforce the dispatcher / detection invariants without needing the
+#     real EP runtime libraries on the runner. That way we catch:
+#
+#       1. Compile-time regressions in any EP — a typo in a `#[cfg]`
+#          guard or a moved EP constructor surfaces immediately.
+#       2. Logic regressions in `pick_provider` / `build_ep_list` — the
+#          unit tests don't depend on the host's hardware so they pass
+#          deterministically on every runner.
+#       3. Drift between the cargo `[features]` table and the
+#          `accelerator::detect()` constants (the test that walks
+#          `detect()` would panic if a row claimed an EP that's not
+#          actually compiled in).
+#
+#   We deliberately don't *run* the EP DLLs in CI — Hexagon NPUs
+#   aren't available on GitHub-hosted runners. Real-hardware verification
+#   happens in the `release.yml` matrix on tagged releases (and via
+#   per-platform manual smoke testing of the Voxnap-Universal artifact).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lints:
+    name: Lints (fmt + clippy)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+          key: lints
+
+      - name: cargo fmt --check
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
+
+      - name: cargo clippy (host defaults)
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --no-deps -- -D warnings
+
+  smoke:
+    name: ${{ matrix.label }}
+    # Each matrix entry compiles the desktop crate with one specific
+    # cargo-feature set, then runs `cargo test --lib`. Compile-only would
+    # be cheaper but the tests are also where the dispatch invariants
+    # live, so running them on every EP combination is what we actually
+    # want for Phase 3.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Default: pure CPU. Same as the historical CI build.
+          - label: default (cpu)
+            os: ubuntu-22.04
+            features: ""
+          # whisper.cpp CUDA — kept compile-only because the runners
+          # don't ship the NVIDIA driver. The `--no-run` flag on Linux
+          # would still emit native CUDA stubs we can't link against,
+          # so we restrict this entry to compilation via `cargo check`.
+          - label: whisper.cpp CUDA (compile-only)
+            os: ubuntu-22.04
+            features: "cuda"
+            check-only: true
+          # ORT EPs. ORT's `download-binaries` feature pulls the
+          # pre-built CPU executor at build time, so these jobs link
+          # cleanly without any vendor SDK on PATH; the EP DLLs only
+          # become required at *runtime* (and our `accelerator.rs`
+          # probes turn EP rows to "Unavailable" when they aren't there).
+          - label: ort-directml (windows)
+            os: windows-latest
+            features: "ort-directml"
+          - label: ort-cuda (compile-only)
+            os: ubuntu-22.04
+            features: "ort-cuda"
+            check-only: true
+          - label: ort-openvino (linux)
+            os: ubuntu-22.04
+            features: "ort-openvino"
+          - label: ort-coreml (macOS)
+            os: macos-14
+            features: "ort-coreml"
+          - label: ort-qnn (compile-only)
+            os: windows-latest
+            features: "ort-qnn"
+            check-only: true
+          - label: ort-all (universal — windows)
+            os: windows-latest
+            features: "ort-all"
+            check-only: true   # pulls every EP; some need vendor SDKs at link time
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libasound2-dev \
+            libayatana-appindicator3-dev librsvg2-dev libssl-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+          key: smoke-${{ matrix.label }}
+
+      - name: cargo check (with features)
+        if: matrix.check-only == true
+        shell: bash
+        run: |
+          set -e
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
+          else
+            cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --features "${{ matrix.features }}"
+          fi
+
+      - name: cargo test (with features)
+        if: matrix.check-only != true
+        shell: bash
+        run: |
+          set -e
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --no-fail-fast
+          else
+            cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib --features "${{ matrix.features }}" --no-fail-fast
+          fi

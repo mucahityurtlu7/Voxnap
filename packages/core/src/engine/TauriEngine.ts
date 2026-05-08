@@ -29,6 +29,7 @@ import type {
   AcceleratorInfo,
   AudioDevice,
   AudioLevel,
+  DiagnosticReport,
   EngineConfig,
   EngineError,
   EngineState,
@@ -40,6 +41,7 @@ export const TAURI_COMMANDS = {
   init: "voxnap_init",
   listDevices: "voxnap_list_devices",
   listAccelerators: "voxnap_list_accelerators",
+  diagnoseAccelerators: "voxnap_diagnose_accelerators",
   start: "voxnap_start",
   stop: "voxnap_stop",
   dispose: "voxnap_dispose",
@@ -174,6 +176,36 @@ export class TauriEngine extends EngineEmitter implements ITranscriptionEngine {
           available: true,
         },
       ];
+    }
+  }
+
+  /**
+   * Verbose accelerator diagnostic. Powers the "Diagnose NPU" button in
+   * Settings → Compute. We swallow errors and synthesise a single
+   * `failed` entry instead, so the modal always has *something* to
+   * render — older Rust binaries that don't export the command yet
+   * still produce a useful "command not registered" message.
+   */
+  async diagnoseAccelerators(): Promise<DiagnosticReport> {
+    try {
+      return await invoke<DiagnosticReport>(TAURI_COMMANDS.diagnoseAccelerators);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[voxnap.tauri] voxnap_diagnose_accelerators failed:", err);
+      const message =
+        typeof err === "string" ? err : (err as Error)?.message ?? String(err);
+      return {
+        platform: "unknown",
+        compiledFeatures: [],
+        entries: [
+          {
+            id: "ipc-error",
+            label: "Tauri IPC",
+            status: "failed",
+            detail: `voxnap_diagnose_accelerators failed: ${message}. The desktop binary may be older than the UI; rebuild it (\`pnpm dev:desktop\` / \`pnpm build:desktop\`) to pick up the new diagnostic command.`,
+          },
+        ],
+      };
     }
   }
 

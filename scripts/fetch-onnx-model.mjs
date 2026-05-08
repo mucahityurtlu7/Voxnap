@@ -69,7 +69,29 @@ const XENOVA_MODELS = {
   "large-v3-turbo": "whisper-large-v3-turbo",
 };
 
-const FILES = ["encoder.onnx", "decoder.onnx", "tokenizer.json"];
+/**
+ * Map of *local file name expected by `onnx_engine.rs`* → *remote
+ * filename in the Xenova repo*. The Rust side looks for
+ * `encoder.onnx` / `decoder.onnx` / `decoder_with_past.onnx`, but
+ * Xenova's optimum exports use the longer `*_model.onnx` /
+ * `*_model_merged.onnx` shape. Mapping here means we never have to
+ * touch the Rust path probe when HF rotates filenames.
+ *
+ * `optional: true` means the script keeps going if the file is
+ * missing in the repo (currently only `decoder_with_past_model.onnx`,
+ * which enables KV-cache reuse — the Rust engine already falls back
+ * to the O(n²) re-feed path when it isn't on disk).
+ */
+const FILES = [
+  { local: "encoder.onnx", remote: "onnx/encoder_model.onnx" },
+  { local: "decoder.onnx", remote: "onnx/decoder_model.onnx" },
+  {
+    local: "decoder_with_past.onnx",
+    remote: "onnx/decoder_with_past_model.onnx",
+    optional: true,
+  },
+  { local: "tokenizer.json", remote: "tokenizer.json" },
+];
 
 const args = process.argv.slice(2);
 let modelId = "base.en";
@@ -109,21 +131,23 @@ console.log(`[fetch-onnx-model] downloading "${modelId}" from Xenova/${repo}`);
 console.log(`[fetch-onnx-model]            → ${targetDir}`);
 
 (async () => {
-  for (const fname of FILES) {
-    const dst = path.join(targetDir, fname);
+  for (const entry of FILES) {
+    const { local, remote, optional } = entry;
+    const dst = path.join(targetDir, local);
     if (fs.existsSync(dst) && fs.statSync(dst).size > 0) {
-      console.log(`[fetch-onnx-model]   ✓ ${fname} (already present)`);
+      console.log(`[fetch-onnx-model]   ✓ ${local} (already present)`);
       continue;
     }
-    // Tokenizer lives at the repo root; the two ONNX graphs live in /onnx.
-    const remoteSubpath =
-      fname === "tokenizer.json" ? fname : `onnx/${fname}`;
-    const url = `https://huggingface.co/Xenova/${repo}/resolve/main/${remoteSubpath}?download=true`;
-    process.stdout.write(`[fetch-onnx-model]   • ${fname} … `);
+    const url = `https://huggingface.co/Xenova/${repo}/resolve/main/${remote}?download=true`;
+    process.stdout.write(`[fetch-onnx-model]   • ${local} … `);
     try {
       await download(url, dst);
       process.stdout.write("done\n");
     } catch (err) {
+      if (optional) {
+        process.stdout.write(`skipped (optional): ${err.message}\n`);
+        continue;
+      }
       process.stdout.write(`failed: ${err.message}\n`);
       process.exit(1);
     }
@@ -140,7 +164,18 @@ function download(srcUrl, dst) {
       srcUrl,
       { headers: { "user-agent": "voxnap-fetch-onnx-model" } },
       (res) => {
-        // Follow redirects (HF redirects to a CDN).
+        // Follow redirects (HF redirects to a CDN). The `Location`
+        // header is sometimes absolute (`https://cas-bridge.xethub…`)
+        // and sometimes a path-relative URL (`/repos/…`); the latter
+        // would blow up `https.get` with "Invalid URL" if we passed
+        // it through as-is, so resolve it against the request URL.
+        //
+        // We must close *and* fully drop the placeholder `.part`
+        // file synchronously before recursing — otherwise the
+        // recursive `download()` creates a fresh `WriteStream` on the
+        // same path, and our deferred `unlinkSync` ends up deleting
+        // the new download's bytes from underneath it (causing the
+        // final `renameSync` to fail with ENOENT).
         if (
           res.statusCode &&
           res.statusCode >= 300 &&
@@ -148,7 +183,25 @@ function download(srcUrl, dst) {
           res.headers.location
         ) {
           res.resume();
-          download(res.headers.location, dst).then(resolve, reject);
+          let next;
+          try {
+            next = new URL(res.headers.location, srcUrl).toString();
+          } catch (e) {
+            reject(
+              new Error(
+                `bad redirect Location ${JSON.stringify(res.headers.location)} from ${srcUrl}: ${e.message}`,
+              ),
+            );
+            return;
+          }
+          file.close(() => {
+            try {
+              fs.unlinkSync(tmp);
+            } catch {
+              /* ignore — file may not exist yet */
+            }
+            download(next, dst).then(resolve, reject);
+          });
           return;
         }
         if (res.statusCode !== 200) {

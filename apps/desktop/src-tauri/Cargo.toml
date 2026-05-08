@@ -145,9 +145,35 @@ ort-all = ["ort-directml", "ort-cuda", "ort-openvino", "ort-qnn", "ort-coreml"]
 # • Android → CPU only. No standardised GPU/NPU path in whisper.cpp yet.
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", default-features = false, features = ["metal", "coreml"] }
+# On macOS we also turn on ORT's CoreML EP so the ONNX pipeline can
+# transparently target Apple Neural Engine — accelerator detection then
+# lights up the ANE row even on builds that didn't pass `--features
+# ort-coreml` on the CLI.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native", "coreml"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 whisper-rs = { version = "0.16", default-features = false, features = ["coreml"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native", "coreml"] }
+
+# ---------------------------------------------------------------------------
+# Windows: auto-enable DirectML.
+# ---------------------------------------------------------------------------
+#
+# DirectML.dll ships with every Windows 10 1903+ install (and is part of
+# the OS feature surface on Windows 11), so flipping `ort/directml` on by
+# default is a *free* win — it gives every Windows user GPU/NPU acceleration
+# through DirectX 12 without forcing them to rebuild Voxnap with manual
+# `--features ort-directml` flags. This is also what unlocks NPU detection
+# on Copilot+ / Intel Core Ultra / AMD Ryzen AI laptops out of the box,
+# because DirectML on Windows 11 24H2+ enumerates the NPU as a D3D12
+# compute device.
+#
+# QNN and OpenVINO still require their vendor SDKs at link time, so we
+# don't auto-enable them — those stay opt-in via `--features ort-qnn` /
+# `--features ort-openvino`. The Voxnap-Universal CI artifact is the
+# binary that ships with all four EPs at once.
+[target.'cfg(target_os = "windows")'.dependencies]
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native", "directml"] }
 
 # Tauri's mobile target needs special handling; this profile is also used
 # from `apps/mobile/src-tauri`.

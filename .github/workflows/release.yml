@@ -8,15 +8,21 @@ name: Release
 #
 # Matrix coverage
 # ---------------
-#   • macOS Apple Silicon  → .dmg / .app  (Metal + CoreML auto-enabled)
-#   • macOS Intel          → .dmg / .app  (Metal + CoreML auto-enabled)
-#   • Windows x64 (CPU)    → .msi / .exe  (works on every Windows box)
-#   • Windows x64 (CUDA)   → .msi / .exe  (separate "NVIDIA" artifact)
-#   • Linux x64 (CPU)      → .AppImage / .deb
-#   • Linux x64 (CUDA)     → .AppImage / .deb
+#   • macOS Apple Silicon     → .dmg / .app  (Metal + CoreML auto-enabled)
+#   • macOS Intel             → .dmg / .app  (Metal + CoreML auto-enabled)
+#   • Windows x64 (CPU)       → .msi / .exe  (works on every Windows box)
+#   • Windows x64 (CUDA)      → .msi / .exe  (separate "NVIDIA" artifact)
+#   • Windows x64 (Universal) → .msi / .exe  (every ORT EP — Phase 3 NPU/GPU bucket;
+#                                              ships DirectML, CUDA, OpenVINO and QNN
+#                                              EPs so any Copilot+ / Core Ultra /
+#                                              Snapdragon X laptop lights up its
+#                                              hardware automatically)
+#   • Linux x64 (CPU)         → .AppImage / .deb
+#   • Linux x64 (CUDA)        → .AppImage / .deb
 #
 # Mobile (Android APK / iOS IPA) lives in `mobile.yml` because it needs a
 # different toolchain (Android NDK / Xcode) and signing setup.
+
 
 on:
   push:
@@ -70,7 +76,24 @@ jobs:
             cuda: true
             artifact-suffix: windows-x64-cuda
 
+          - label: Windows x64 (Universal — every ORT EP)
+            # The Voxnap-Universal artifact carries every ORT execution
+            # provider Voxnap can target on Windows (DirectML, CUDA,
+            # OpenVINO, QNN). It's the binary we hand to users with
+            # NPU/GPU hardware whose vendor SDKs are already on PATH —
+            # `accelerator::detect()` flips the matching row to
+            # "Available" at runtime, otherwise it stays "Unavailable"
+            # with an actionable hint. The build uses ORT's
+            # `download-binaries` feature to pull pre-built DLLs into
+            # the bundle so end users don't have to install ORT.
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            tauri-args: "-- --features ort-all"
+            features: "ort-all"
+            artifact-suffix: windows-x64-universal
+
           # ---------------- Linux ----------------
+
           - label: Linux x64 (CPU)
             os: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu

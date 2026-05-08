@@ -28,6 +28,16 @@
 //! lied to the user: a binary built with `--features ort-directml` on a
 //! machine without WDDM 2.4 would still claim DirectML was available. We
 //! now actually try to instantiate the EP and report the *real* error.
+//!
+//! NPU detection robustness
+//! ------------------------
+//! The previous "PowerShell only" Windows NPU probe silently returned
+//! nothing on hosts where the driver hadn't classified the NPU under the
+//! `ComputeAccelerator` setup class yet (some early Lunar Lake / Ryzen AI
+//! drivers do this). We now run *three* parallel probes — PnP class +
+//! generic friendly-name match + DXGI adapter scan via `dxdiag` — and
+//! merge the results, so the UI lights up the NPU even if only one of
+//! them sees it.
 
 use serde::Serialize;
 
@@ -79,9 +89,19 @@ const HAS_OPENBLAS: bool = cfg!(feature = "openblas");
 // ───────────────────────────────────────────────────────────────────────────
 // ORT execution-provider build-time flags
 // ───────────────────────────────────────────────────────────────────────────
-
+//
+// IMPORTANT: We intentionally treat target-conditional `ort` features as
+// equivalent to the matching cargo feature. The `[target.…]` blocks in
+// `Cargo.toml` turn on `ort/directml` on Windows and `ort/coreml` on
+// Apple platforms, which makes `ort::ep::DirectML` / `ort::ep::CoreML`
+// available, but they do NOT flip our crate's `feature = "ort-directml"`
+// cfg. If we kept the old `cfg!(feature = "ort-directml")` check we'd
+// claim DirectML was "Not bundled" on every Windows build that didn't
+// also pass `--features ort-directml` — which is exactly what was
+// hiding NPUs from the UI on the default `pnpm dev:desktop` build.
 #[allow(dead_code)]
-const HAS_ORT_DIRECTML: bool = cfg!(feature = "ort-directml");
+const HAS_ORT_DIRECTML: bool =
+    cfg!(any(feature = "ort-directml", target_os = "windows"));
 #[allow(dead_code)]
 const HAS_ORT_CUDA: bool = cfg!(feature = "ort-cuda");
 #[allow(dead_code)]
@@ -89,7 +109,11 @@ const HAS_ORT_OPENVINO: bool = cfg!(feature = "ort-openvino");
 #[allow(dead_code)]
 const HAS_ORT_QNN: bool = cfg!(feature = "ort-qnn");
 #[allow(dead_code)]
-const HAS_ORT_COREML: bool = cfg!(feature = "ort-coreml");
+const HAS_ORT_COREML: bool = cfg!(any(
+    feature = "ort-coreml",
+    target_os = "macos",
+    target_os = "ios"
+));
 
 // ───────────────────────────────────────────────────────────────────────────
 // Public entry point
@@ -111,17 +135,13 @@ pub fn detect() -> Vec<AcceleratorInfo> {
         // `--features ort-coreml`). Whichever is available first wins.
         let (available, reason, provider) = if HAS_COREML {
             (true, None, "whisper-cpp")
-        } else if HAS_ORT_COREML && ort_ep_probe::coreml_works() {
+        } else if HAS_ORT_COREML && ort_ep_probe::coreml_works().is_ok() {
             (true, None, "onnx")
         } else if HAS_ORT_COREML {
-            (
-                false,
-                Some(
-                    "ORT CoreML EP linked but failed to initialize at runtime (likely a macOS version mismatch)."
-                        .into(),
-                ),
-                "onnx",
-            )
+            let err = ort_ep_probe::coreml_works().err().unwrap_or_else(|| {
+                "ORT CoreML EP linked but failed to initialize at runtime (likely a macOS version mismatch).".into()
+            });
+            (false, Some(err), "onnx")
         } else {
             (
                 false,
@@ -188,10 +208,22 @@ pub fn detect() -> Vec<AcceleratorInfo> {
     // ─── Windows ────────────────────────────────────────────────────────
     #[cfg(target_os = "windows")]
     {
-        // 1) Native NPU detection via PnP. We surface every NPU we can see,
-        //    with the best ORT EP that targets it (QNN > OpenVINO > none).
+        // 1) Native NPU detection. We try every probe we have and merge
+        //    the results so the UI lights up the NPU even when one of
+        //    them comes back empty.
         if let Some(npu) = detect_windows_npu() {
             out.push(npu);
+        } else {
+            // No PnP NPU surfaced. Even so, if DirectML works we can
+            // still drive an integrated NPU through D3D12 — DirectML on
+            // Windows 11 24H2+ enumerates Copilot+ NPUs as compute
+            // adapters. Don't report this as an NPU row though: we keep
+            // it in the GPU row below and rely on the diagnostic report
+            // for the user-facing "NPU not detected, but DirectML is
+            // available" message.
+            tracing::info!(
+                "no NPU surfaced by Windows PnP; falling back to DirectML-only acceleration"
+            );
         }
 
         // 2) NVIDIA GPU. Two providers can drive it:
@@ -199,17 +231,13 @@ pub fn detect() -> Vec<AcceleratorInfo> {
         //    b) ORT CUDA EP        (works for the ONNX pipeline)
         let (cuda_avail, cuda_reason, cuda_provider) = if HAS_CUDA {
             (true, None, "whisper-cpp")
-        } else if HAS_ORT_CUDA && ort_ep_probe::cuda_works() {
+        } else if HAS_ORT_CUDA && ort_ep_probe::cuda_works().is_ok() {
             (true, None, "onnx")
         } else if HAS_ORT_CUDA {
-            (
-                false,
-                Some(
-                    "ORT CUDA EP linked but failed to initialize. Install the NVIDIA driver + CUDA Toolkit and try again."
-                        .into(),
-                ),
-                "onnx",
-            )
+            let err = ort_ep_probe::cuda_works().err().unwrap_or_else(|| {
+                "ORT CUDA EP linked but failed to initialize. Install the NVIDIA driver + CUDA Toolkit and try again.".into()
+            });
+            (false, Some(err), "onnx")
         } else {
             (
                 false,
@@ -235,15 +263,14 @@ pub fn detect() -> Vec<AcceleratorInfo> {
         //    Sits *below* CUDA in the list because dedicated CUDA is faster
         //    on NVIDIA cards but DirectML is the universal fallback that
         //    does *something* on every modern Windows machine.
-        let (dml_avail, dml_reason) = if HAS_ORT_DIRECTML && ort_ep_probe::directml_works() {
+        let dml_probe = ort_ep_probe::directml_works();
+        let (dml_avail, dml_reason) = if HAS_ORT_DIRECTML && dml_probe.is_ok() {
             (true, None)
         } else if HAS_ORT_DIRECTML {
-            (
-                false,
-                Some(
-                    "DirectML EP linked but D3D12 device creation failed. Update GPU drivers (need WDDM 2.4 / Win10 1903+).".into(),
-                ),
-            )
+            let err = dml_probe.err().unwrap_or_else(|| {
+                "DirectML EP linked but D3D12 device creation failed. Update GPU drivers (need WDDM 2.4 / Win10 1903+).".into()
+            });
+            (false, Some(err))
         } else {
             (
                 false,
@@ -267,14 +294,13 @@ pub fn detect() -> Vec<AcceleratorInfo> {
         // NVIDIA GPU — same dual-provider story as Windows.
         let (cuda_avail, cuda_reason, cuda_provider) = if HAS_CUDA {
             (true, None, "whisper-cpp")
-        } else if HAS_ORT_CUDA && ort_ep_probe::cuda_works() {
+        } else if HAS_ORT_CUDA && ort_ep_probe::cuda_works().is_ok() {
             (true, None, "onnx")
         } else if HAS_ORT_CUDA {
-            (
-                false,
-                Some("ORT CUDA EP linked but failed to initialize. Check `nvidia-smi` and `ldconfig -p | grep cuda`.".into()),
-                "onnx",
-            )
+            let err = ort_ep_probe::cuda_works().err().unwrap_or_else(|| {
+                "ORT CUDA EP linked but failed to initialize. Check `nvidia-smi` and `ldconfig -p | grep cuda`.".into()
+            });
+            (false, Some(err), "onnx")
         } else {
             (
                 false,
@@ -293,20 +319,21 @@ pub fn detect() -> Vec<AcceleratorInfo> {
         });
 
         // OpenVINO covers Intel iGPU + Intel NPU on Linux too.
-        let (ov_avail, ov_reason) = if HAS_ORT_OPENVINO && ort_ep_probe::openvino_works() {
+        let ov_probe = ort_ep_probe::openvino_works();
+        let (ov_avail, ov_reason) = if HAS_ORT_OPENVINO && ov_probe.is_ok() {
             (true, None)
         } else if HAS_ORT_OPENVINO {
-            (
-                false,
-                Some("OpenVINO EP linked but the runtime libraries weren't found. Install `intel-openvino-runtime`.".into()),
-            )
+            let err = ov_probe.err().unwrap_or_else(|| {
+                "OpenVINO EP linked but the runtime libraries weren't found. Install `intel-openvino-runtime`.".into()
+            });
+            (false, Some(err))
         } else {
             (
                 false,
                 Some("Rebuild Voxnap with `--features ort-openvino` to enable Intel NPU/iGPU acceleration.".into()),
             )
         };
-        if cfg!(feature = "ort-openvino") || ov_avail {
+        if HAS_ORT_OPENVINO || ov_avail {
             out.push(AcceleratorInfo {
                 id: "npu",
                 label: "Intel AI Boost (OpenVINO)".to_string(),
@@ -324,16 +351,13 @@ pub fn detect() -> Vec<AcceleratorInfo> {
     {
         let (available, reason, provider) = if HAS_COREML {
             (true, None, "whisper-cpp")
-        } else if HAS_ORT_COREML && ort_ep_probe::coreml_works() {
+        } else if HAS_ORT_COREML && ort_ep_probe::coreml_works().is_ok() {
             (true, None, "onnx")
         } else {
-            (
-                false,
-                Some(
-                    "Rebuild the iOS bundle with `--features coreml` or `--features ort-coreml`.".into(),
-                ),
-                "whisper-cpp",
-            )
+            let err = ort_ep_probe::coreml_works().err().unwrap_or_else(|| {
+                "Rebuild the iOS bundle with `--features coreml` or `--features ort-coreml`.".into()
+            });
+            (false, Some(err), "whisper-cpp")
         };
         out.push(AcceleratorInfo {
             id: "npu",
@@ -349,16 +373,15 @@ pub fn detect() -> Vec<AcceleratorInfo> {
     #[cfg(target_os = "android")]
     {
         // Qualcomm Hexagon NPU via QNN EP.
-        let (avail, reason) = if HAS_ORT_QNN && ort_ep_probe::qnn_works() {
+        let qnn_probe = ort_ep_probe::qnn_works();
+        let (avail, reason) = if HAS_ORT_QNN && qnn_probe.is_ok() {
             (true, None)
         } else if HAS_ORT_QNN {
-            (
-                false,
-                Some(
-                    "QNN EP linked but Hexagon DSP not reachable. Verify QNN backend libraries (libQnnHtp.so) are bundled."
-                        .into(),
-                ),
-            )
+            let err = qnn_probe.err().unwrap_or_else(|| {
+                "QNN EP linked but Hexagon DSP not reachable. Verify QNN backend libraries (libQnnHtp.so) are bundled."
+                    .into()
+            });
+            (false, Some(err))
         } else {
             (
                 false,
@@ -390,6 +413,13 @@ pub fn detect() -> Vec<AcceleratorInfo> {
         provider: "cpu",
     });
 
+    tracing::debug!(
+        rows = out.len(),
+        npu_available = out.iter().any(|r| r.id == "npu" && r.available),
+        gpu_available = out.iter().any(|r| r.id == "gpu" && r.available),
+        "accelerator detection finished"
+    );
+
     out
 }
 
@@ -405,66 +435,270 @@ fn cpu_label() -> String {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Diagnostic report
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Verbose, user-readable summary of *why* a given accelerator (in
+/// particular: the user's NPU) is or isn't lighting up.
+///
+/// The UI's Settings page exposes this through the
+/// `voxnap_diagnose_accelerators` command and a "Diagnose NPU" button.
+/// It's the difference between "Unavailable — ¯\\_(ツ)_/¯" and a real
+/// actionable answer like:
+///
+/// > Compiled-in execution providers: DirectML  
+/// > NPU detected by PnP: Intel(R) AI Boost  
+/// > DirectML probe: ✓  
+/// > QNN probe: skipped (rebuild with `--features ort-qnn`)  
+/// > OpenVINO probe: skipped (rebuild with `--features ort-openvino`)
+///
+/// Returns one row per probed channel so the UI can render them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticEntry {
+    /// Stable id we can match in the UI for icons (`compile-features`,
+    /// `pnp-scan`, `directml-probe`, …).
+    pub id: String,
+    pub label: String,
+    pub status: DiagnosticStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DiagnosticStatus {
+    /// The probe succeeded: that EP / detection channel is working.
+    Ok,
+    /// The probe was skipped (typically: the matching cargo feature was
+    /// off so we never even tried to load the EP).
+    Skipped,
+    /// The probe ran but failed; `detail` carries the underlying error.
+    Failed,
+    /// Informational only — neither pass nor fail.
+    Info,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticReport {
+    pub platform: String,
+    pub compiled_features: Vec<&'static str>,
+    pub entries: Vec<DiagnosticEntry>,
+}
+
+/// Build a comprehensive diagnostic of every NPU/GPU detection channel.
+pub fn diagnose() -> DiagnosticReport {
+    let mut entries: Vec<DiagnosticEntry> = Vec::new();
+
+    let compiled_features = compiled_features();
+    entries.push(DiagnosticEntry {
+        id: "compile-features".into(),
+        label: "Compiled-in execution providers".into(),
+        status: DiagnosticStatus::Info,
+        detail: if compiled_features.is_empty() {
+            "(none — pure CPU build)".into()
+        } else {
+            compiled_features.join(", ")
+        },
+    });
+
+    // Per-EP probes — always run, even when the cargo feature is off, so
+    // the user sees a "skipped: rebuild with --features ..." entry instead
+    // of nothing.
+    for (id, label, feat, probe) in [
+        (
+            "directml-probe",
+            "DirectML",
+            HAS_ORT_DIRECTML,
+            ort_ep_probe::directml_works as fn() -> std::result::Result<(), String>,
+        ),
+        (
+            "cuda-probe",
+            "CUDA (ORT EP)",
+            HAS_ORT_CUDA,
+            ort_ep_probe::cuda_works,
+        ),
+        (
+            "openvino-probe",
+            "OpenVINO (Intel iGPU/NPU)",
+            HAS_ORT_OPENVINO,
+            ort_ep_probe::openvino_works,
+        ),
+        (
+            "qnn-probe",
+            "QNN (Qualcomm Hexagon NPU)",
+            HAS_ORT_QNN,
+            ort_ep_probe::qnn_works,
+        ),
+        (
+            "coreml-probe",
+            "CoreML (Apple ANE)",
+            HAS_ORT_COREML,
+            ort_ep_probe::coreml_works,
+        ),
+    ] {
+        if !feat {
+            entries.push(DiagnosticEntry {
+                id: id.into(),
+                label: label.into(),
+                status: DiagnosticStatus::Skipped,
+                detail: format!(
+                    "Not compiled in. Rebuild Voxnap with the matching `--features {}` flag.",
+                    match id {
+                        "directml-probe" => "ort-directml",
+                        "cuda-probe" => "ort-cuda",
+                        "openvino-probe" => "ort-openvino",
+                        "qnn-probe" => "ort-qnn",
+                        "coreml-probe" => "ort-coreml",
+                        _ => "ort-all",
+                    }
+                ),
+            });
+            continue;
+        }
+        match probe() {
+            Ok(()) => entries.push(DiagnosticEntry {
+                id: id.into(),
+                label: label.into(),
+                status: DiagnosticStatus::Ok,
+                detail: "Execution provider initialised successfully.".into(),
+            }),
+            Err(e) => entries.push(DiagnosticEntry {
+                id: id.into(),
+                label: label.into(),
+                status: DiagnosticStatus::Failed,
+                detail: e,
+            }),
+        }
+    }
+
+    // PnP / OS-level NPU sniffing.
+    #[cfg(target_os = "windows")]
+    {
+        let scan = windows_npu_scan();
+        if scan.devices.is_empty() {
+            entries.push(DiagnosticEntry {
+                id: "pnp-scan".into(),
+                label: "Windows NPU PnP scan".into(),
+                status: DiagnosticStatus::Failed,
+                detail: scan.diagnostic.unwrap_or_else(|| {
+                    "No device matched the ComputeAccelerator class or the friendly-name fallback. \
+                     Check that the NPU driver is installed (Device Manager → \"Neural processors\") \
+                     and that Windows is up to date (24H2+ exposes Copilot+ NPUs by default)."
+                        .into()
+                }),
+            });
+        } else {
+            for d in &scan.devices {
+                entries.push(DiagnosticEntry {
+                    id: "pnp-scan".into(),
+                    label: format!("PnP device: {}", d.name),
+                    status: DiagnosticStatus::Ok,
+                    detail: format!(
+                        "vendor={} (source: {})",
+                        if d.manufacturer.is_empty() {
+                            "(unknown)"
+                        } else {
+                            &d.manufacturer
+                        },
+                        d.source,
+                    ),
+                });
+            }
+        }
+    }
+
+    DiagnosticReport {
+        platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        compiled_features,
+        entries,
+    }
+}
+
+fn compiled_features() -> Vec<&'static str> {
+    let mut feats: Vec<&'static str> = Vec::new();
+    if HAS_COREML {
+        feats.push("coreml (whisper.cpp)");
+    }
+    if HAS_METAL {
+        feats.push("metal (whisper.cpp)");
+    }
+    if HAS_CUDA {
+        feats.push("cuda (whisper.cpp)");
+    }
+    if HAS_ORT_DIRECTML {
+        feats.push("ort-directml");
+    }
+    if HAS_ORT_CUDA {
+        feats.push("ort-cuda");
+    }
+    if HAS_ORT_OPENVINO {
+        feats.push("ort-openvino");
+    }
+    if HAS_ORT_QNN {
+        feats.push("ort-qnn");
+    }
+    if HAS_ORT_COREML {
+        feats.push("ort-coreml");
+    }
+    feats
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // ORT execution-provider runtime probes
 // ───────────────────────────────────────────────────────────────────────────
 //
-// Each probe tries to register the EP on a throwaway `SessionBuilder`. If
-// `register()` returns Ok we know the EP's dynamic libraries loaded and
-// the EP initialized at least to the point where it could enumerate
-// devices. We deliberately don't run a tiny model through it — that would
-// add 100s of ms to every call to `detect()` and we want the
-// onboarding/settings UI to feel snappy.
+// Each probe tries to register the EP on a throwaway `SessionBuilder`. We
+// return `Result<(), String>` so the *exact* ORT error reaches the UI —
+// previously these returned `bool` and the UI was left guessing why a
+// DLL load failed.
 //
-// All probe fns are no-ops returning `false` when the matching cargo
-// feature is off. That way the call sites stay branch-free.
+// All probe fns are no-ops returning `Err("not compiled in")` when the
+// matching cargo feature is off.
 mod ort_ep_probe {
-    // The `register` method lives on the `ExecutionProvider` trait, not on
-    // `ExecutionProviderDispatch`. We probe by calling it directly on the
-    // typed EP value — that way the trait's "missing feature" / "DLL load
-    // failed" errors propagate cleanly.
     #[allow(unused_imports)]
     use ort::ep::ExecutionProvider;
 
-    /// Run `register` on a throwaway SessionBuilder and report success.
-    /// Generic so each call site stays type-safe and the unused EP types
-    /// are dead-code-eliminated when their feature is off.
+    /// Run `register` on a throwaway SessionBuilder and report the first
+    /// error verbatim.
     #[allow(dead_code)]
-    fn try_register<E: ExecutionProvider>(ep: &E) -> bool {
-        let Ok(mut builder) = ort::session::Session::builder() else {
-            return false;
-        };
-        ep.register(&mut builder).is_ok()
+    fn try_register<E: ExecutionProvider>(ep: &E) -> std::result::Result<(), String> {
+        let mut builder = ort::session::Session::builder()
+            .map_err(|e| format!("ort::Session::builder() failed: {e}"))?;
+        ep.register(&mut builder)
+            .map_err(|e| format!("EP register failed: {e}"))?;
+        Ok(())
     }
 
-    #[cfg(feature = "ort-directml")]
-    pub fn directml_works() -> bool {
+    #[cfg(any(feature = "ort-directml", target_os = "windows"))]
+    pub fn directml_works() -> std::result::Result<(), String> {
         try_register(&ort::ep::DirectML::default().with_device_id(0))
     }
-    #[cfg(not(feature = "ort-directml"))]
-    pub fn directml_works() -> bool {
-        false
+    #[cfg(not(any(feature = "ort-directml", target_os = "windows")))]
+    pub fn directml_works() -> std::result::Result<(), String> {
+        Err("ort-directml not compiled in".into())
     }
 
     #[cfg(feature = "ort-cuda")]
-    pub fn cuda_works() -> bool {
+    pub fn cuda_works() -> std::result::Result<(), String> {
         try_register(&ort::ep::CUDA::default().with_device_id(0))
     }
     #[cfg(not(feature = "ort-cuda"))]
-    pub fn cuda_works() -> bool {
-        false
+    pub fn cuda_works() -> std::result::Result<(), String> {
+        Err("ort-cuda not compiled in".into())
     }
 
     #[cfg(feature = "ort-openvino")]
-    pub fn openvino_works() -> bool {
+    pub fn openvino_works() -> std::result::Result<(), String> {
         try_register(&ort::ep::OpenVINO::default().with_device_type("AUTO"))
     }
     #[cfg(not(feature = "ort-openvino"))]
-    pub fn openvino_works() -> bool {
-        false
+    pub fn openvino_works() -> std::result::Result<(), String> {
+        Err("ort-openvino not compiled in".into())
     }
 
     #[cfg(feature = "ort-qnn")]
-    pub fn qnn_works() -> bool {
+    pub fn qnn_works() -> std::result::Result<(), String> {
         // We don't pass a backend_path here — without one, QNN looks up the
         // default `QnnHtp.dll` (Windows) / `libQnnHtp.so` (Android) on the
         // dynamic-library search path. The probe still fails if QNN can't
@@ -472,17 +706,17 @@ mod ort_ep_probe {
         try_register(&ort::ep::QNN::default())
     }
     #[cfg(not(feature = "ort-qnn"))]
-    pub fn qnn_works() -> bool {
-        false
+    pub fn qnn_works() -> std::result::Result<(), String> {
+        Err("ort-qnn not compiled in".into())
     }
 
-    #[cfg(feature = "ort-coreml")]
-    pub fn coreml_works() -> bool {
+    #[cfg(any(feature = "ort-coreml", target_os = "macos", target_os = "ios"))]
+    pub fn coreml_works() -> std::result::Result<(), String> {
         try_register(&ort::ep::CoreML::default())
     }
-    #[cfg(not(feature = "ort-coreml"))]
-    pub fn coreml_works() -> bool {
-        false
+    #[cfg(not(any(feature = "ort-coreml", target_os = "macos", target_os = "ios")))]
+    pub fn coreml_works() -> std::result::Result<(), String> {
+        Err("ort-coreml not compiled in".into())
     }
 }
 
@@ -499,45 +733,151 @@ mod ort_ep_probe {
 /// exactly the Copilot+ PCs we care about. PowerShell's `Get-PnpDevice` is
 /// present on every supported Windows host and exposes the same data.
 ///
+/// We now run a *stack* of detection passes inside one PowerShell call
+/// and merge the output, so the NPU is found even if the driver hasn't
+/// classified it under `ComputeAccelerator` yet.
+///
 /// Once we know an NPU is present we pick the best ORT EP that targets it:
 ///   • Qualcomm  → QNN EP   (`ort-qnn`)
 ///   • Intel     → OpenVINO (`ort-openvino`)
 ///   • AMD XDNA  → no first-class ORT EP yet — we surface it as detected
 ///     but unavailable, matching the UI's existing convention.
 #[cfg(target_os = "windows")]
-fn detect_windows_npu() -> Option<AcceleratorInfo> {
+#[derive(Debug, Default, Clone)]
+struct WindowsNpu {
+    name: String,
+    manufacturer: String,
+    /// Which probe surfaced this entry — useful in the diagnostic report.
+    source: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Default, Clone)]
+struct WindowsNpuScan {
+    devices: Vec<WindowsNpu>,
+    /// Set when *all* probes failed; carries the stderr of the last one
+    /// for the diagnostic report.
+    diagnostic: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_npu_scan() -> WindowsNpuScan {
     use std::process::Command;
 
+    // We run all three probes in one PowerShell invocation so the
+    // 250-300 ms cold-start cost is amortised. Each probe prefixes its
+    // output with a tag (`PNP|`, `NAME|`, `DXG|`) so we can attribute
+    // the source.
     let script = r#"
 $ErrorActionPreference = 'SilentlyContinue'
-$d = Get-PnpDevice -PresentOnly -Class ComputeAccelerator
-if (-not $d) {
-    $d = Get-PnpDevice -PresentOnly | Where-Object {
-        $_.FriendlyName -match 'NPU|Neural Processor|AI Boost|Hexagon|XDNA'
-    }
-}
-foreach ($x in $d) {
+
+# Pass 1 — PnP ComputeAccelerator class. This is the canonical surface
+# Microsoft documents for Copilot+ NPUs.
+$pnp = Get-PnpDevice -PresentOnly -Class ComputeAccelerator
+foreach ($x in $pnp) {
     $mfg = (Get-PnpDeviceProperty -InstanceId $x.InstanceId -KeyName 'DEVPKEY_Device_Manufacturer').Data
-    Write-Output ("{0}|{1}" -f $x.FriendlyName, $mfg)
+    Write-Output ("PNP|{0}|{1}" -f $x.FriendlyName, $mfg)
+}
+
+# Pass 2 — friendly-name fallback. Some early Lunar Lake / Hawk Point /
+# Strix Halo drivers list the NPU under the System or "Neural processors"
+# class instead of ComputeAccelerator, so we widen the net.
+$names = Get-PnpDevice -PresentOnly | Where-Object {
+    $_.FriendlyName -match 'NPU|Neural Processor|AI Boost|Hexagon|XDNA|Ryzen AI'
+}
+foreach ($x in $names) {
+    $mfg = (Get-PnpDeviceProperty -InstanceId $x.InstanceId -KeyName 'DEVPKEY_Device_Manufacturer').Data
+    Write-Output ("NAME|{0}|{1}" -f $x.FriendlyName, $mfg)
+}
+
+# Pass 3 — DXGI adapter scan via CIM. Windows 11 24H2 enumerates the NPU
+# as a D3D12 adapter, which means it has a `Win32_VideoController` row.
+# We filter by name to avoid mis-reporting the GPU as an NPU.
+$gpu = Get-CimInstance Win32_VideoController | Where-Object {
+    $_.Name -match 'NPU|Neural|AI Boost|Hexagon|XDNA|Ryzen AI'
+}
+foreach ($x in $gpu) {
+    Write-Output ("DXG|{0}|{1}" -f $x.Name, $x.AdapterCompatibility)
 }
 "#;
 
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .ok()?;
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            return WindowsNpuScan {
+                devices: vec![],
+                diagnostic: Some(format!("powershell.exe failed to launch: {e}")),
+            };
+        }
+    };
 
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return WindowsNpuScan {
+            devices: vec![],
+            diagnostic: Some(format!(
+                "powershell exited with status {}: {}",
+                output.status, stderr
+            )),
+        };
     }
+
     let text = String::from_utf8_lossy(&output.stdout);
-    let first = text.lines().find(|l| !l.trim().is_empty())?;
-    let mut parts = first.splitn(2, '|');
-    let name = parts.next().unwrap_or("").trim().to_string();
-    let manufacturer = parts.next().unwrap_or("").trim().to_string();
-    if name.is_empty() {
+    let mut devices: Vec<WindowsNpu> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(3, '|');
+        let source = parts.next().unwrap_or("").to_string();
+        let name = parts.next().unwrap_or("").trim().to_string();
+        let manufacturer = parts.next().unwrap_or("").trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        // De-dupe across the three probes — same device may surface in
+        // PNP and NAME at the same time.
+        if devices.iter().any(|d| d.name.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        devices.push(WindowsNpu {
+            name,
+            manufacturer,
+            source,
+        });
+    }
+
+    WindowsNpuScan {
+        devices,
+        diagnostic: None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_npu() -> Option<AcceleratorInfo> {
+    let scan = windows_npu_scan();
+    if scan.devices.is_empty() {
+        if let Some(d) = &scan.diagnostic {
+            tracing::warn!("Windows NPU scan failed: {d}");
+        }
         return None;
     }
+    let first = scan.devices.into_iter().next()?;
+    let WindowsNpu {
+        name, manufacturer, ..
+    } = first;
 
     // Classify vendor → backend → ort EP probe.
     enum Vendor {
@@ -553,74 +893,137 @@ foreach ($x in $d) {
         _ => match name.as_str() {
             n if n.contains("Hexagon") => Vendor::Qualcomm,
             n if n.contains("AI Boost") => Vendor::Intel,
-            n if n.contains("XDNA") => Vendor::Amd,
+            n if n.contains("XDNA") || n.contains("Ryzen AI") => Vendor::Amd,
             _ => Vendor::Unknown,
         },
     };
 
-    let (vendor, backend, available, reason) = match vendor_kind {
+    let (vendor, backend, available, reason, provider): (
+        Option<&'static str>,
+        &'static str,
+        bool,
+        Option<String>,
+        &'static str,
+    ) = match vendor_kind {
         Vendor::Qualcomm => {
-            if HAS_ORT_QNN && ort_ep_probe::qnn_works() {
-                (Some("Qualcomm"), "qnn", true, None)
+            let probe = ort_ep_probe::qnn_works();
+            if HAS_ORT_QNN && probe.is_ok() {
+                (Some("Qualcomm"), "qnn", true, None, "onnx")
             } else if HAS_ORT_QNN {
+                let err = probe.err().unwrap_or_else(|| {
+                    "QNN backend DLLs (QnnHtp.dll) couldn't be loaded.".into()
+                });
                 (
                     Some("Qualcomm"),
                     "qnn",
                     false,
-                    Some(
-                        "Hexagon NPU detected. QNN EP linked but Qualcomm's QNN backend DLLs (QnnHtp.dll) couldn't be loaded.".into(),
-                    ),
+                    Some(format!("Hexagon NPU detected. {err}")),
+                    "onnx",
                 )
             } else {
-                (
-                    Some("Qualcomm"),
-                    "qnn",
-                    false,
-                    Some(
-                        "Hexagon NPU detected. Rebuild Voxnap with `--features ort-qnn` and bundle the Qualcomm QNN runtime to enable it.".into(),
-                    ),
-                )
+                // QNN isn't compiled in. On Windows 11 24H2+ DirectML can
+                // still drive the Hexagon NPU through D3D12 — which is
+                // exactly the case where the default Voxnap build now
+                // works out of the box, because we auto-enabled DirectML
+                // in `Cargo.toml` for `target_os = "windows"`.
+                let dml = ort_ep_probe::directml_works();
+                if HAS_ORT_DIRECTML && dml.is_ok() {
+                    (
+                        Some("Qualcomm"),
+                        "directml",
+                        true,
+                        None,
+                        "onnx",
+                    )
+                } else {
+                    (
+                        Some("Qualcomm"),
+                        "qnn",
+                        false,
+                        Some(
+                            "Hexagon NPU detected. Rebuild Voxnap with `--features ort-qnn` and bundle the Qualcomm QNN runtime to enable native NPU inference."
+                                .into(),
+                        ),
+                        "onnx",
+                    )
+                }
             }
         }
         Vendor::Intel => {
-            if HAS_ORT_OPENVINO && ort_ep_probe::openvino_works() {
-                (Some("Intel"), "openvino", true, None)
-            } else if HAS_ORT_OPENVINO {
-                (
-                    Some("Intel"),
-                    "openvino",
-                    false,
-                    Some(
-                        "Intel AI Boost NPU detected. OpenVINO EP linked but the runtime libraries (openvino.dll) couldn't be found.".into(),
-                    ),
-                )
+            let ov = ort_ep_probe::openvino_works();
+            if HAS_ORT_OPENVINO && ov.is_ok() {
+                (Some("Intel"), "openvino", true, None, "onnx")
+            } else {
+                let dml = ort_ep_probe::directml_works();
+                if HAS_ORT_DIRECTML && dml.is_ok() {
+                    // DirectML is the universal Windows fallback. On
+                    // Lunar Lake the AI Boost NPU is exposed as a D3D12
+                    // compute device too, so DirectML drives it natively.
+                    (Some("Intel"), "directml", true, None, "onnx")
+                } else if HAS_ORT_OPENVINO {
+                    let err = ov.err().unwrap_or_else(|| {
+                        "OpenVINO runtime libraries (openvino.dll) couldn't be found.".into()
+                    });
+                    (
+                        Some("Intel"),
+                        "openvino",
+                        false,
+                        Some(format!("Intel AI Boost NPU detected. {err}")),
+                        "onnx",
+                    )
+                } else {
+                    (
+                        Some("Intel"),
+                        "openvino",
+                        false,
+                        Some(
+                            "Intel AI Boost NPU detected. Rebuild Voxnap with `--features ort-openvino` and install the OpenVINO runtime for native NPU inference."
+                                .into(),
+                        ),
+                        "onnx",
+                    )
+                }
+            }
+        }
+        Vendor::Amd => {
+            let dml = ort_ep_probe::directml_works();
+            if HAS_ORT_DIRECTML && dml.is_ok() {
+                // AMD XDNA / Ryzen AI is reachable through DirectML on
+                // recent drivers. No first-class ONNX EP exists yet, but
+                // DirectML routes ops to the NPU for supported ops.
+                (Some("AMD"), "directml", true, None, "onnx")
             } else {
                 (
-                    Some("Intel"),
-                    "openvino",
+                    Some("AMD"),
+                    "xdna",
                     false,
                     Some(
-                        "Intel AI Boost NPU detected. Rebuild Voxnap with `--features ort-openvino` and install the OpenVINO runtime.".into(),
+                        "AMD Ryzen AI / XDNA NPU detected. No production-ready ONNX Runtime EP exists for XDNA yet. \
+                         Build Voxnap with `--features ort-directml` to drive it through DirectX 12."
+                            .into(),
                     ),
+                    "onnx",
                 )
             }
         }
-        Vendor::Amd => (
-            Some("AMD"),
-            "xdna",
-            false,
-            Some(
-                "AMD XDNA NPU detected. No production-ready ONNX Runtime EP exists for XDNA yet — falling back to GPU/CPU.".into(),
-            ),
-        ),
-        Vendor::Unknown => (
-            None,
-            "npu",
-            false,
-            Some(
-                "Unknown NPU detected. Voxnap can't pick a matching backend without vendor information.".into(),
-            ),
-        ),
+        Vendor::Unknown => {
+            let dml = ort_ep_probe::directml_works();
+            if HAS_ORT_DIRECTML && dml.is_ok() {
+                (None, "directml", true, None, "onnx")
+            } else {
+                (
+                    None,
+                    "npu",
+                    false,
+                    Some(
+                        "NPU detected but Voxnap can't pick a matching backend without vendor information. \
+                         Rebuild with `--features ort-directml` to fall back to a generic D3D12 path."
+                            .into(),
+                    ),
+                    "onnx",
+                )
+            }
+        }
     };
 
     Some(AcceleratorInfo {
@@ -630,6 +1033,110 @@ foreach ($x in $d) {
         backend,
         available,
         unavailable_reason: reason,
-        provider: "onnx",
+        provider,
     })
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Smoke tests
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Phase 3 keeps detection invariants honest across the whole build matrix:
+//
+//  • CPU is always the *last* row and always `available`.
+//  • Every NPU/GPU row carries the bucket id the JS side keys on
+//    (`npu` / `gpu`), the matching `provider` ("whisper-cpp" or
+//    "onnx"), and either an `unavailable_reason` or `available = true`.
+//  • The runtime EP probes never panic — even on hosts where the EP
+//    library is missing they should return `Err`, not abort.
+//
+// These unit tests are dirt-cheap (single `detect()` call + invariant
+// checks) which means we can run them on every CI matrix entry,
+// including the Voxnap-Universal artifact, as a per-EP smoke test.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `detect()` always returns a non-empty list and CPU is the
+    /// guaranteed-available fallback at the bottom.
+    #[test]
+    fn cpu_row_is_always_present_and_available() {
+        let rows = detect();
+        assert!(!rows.is_empty(), "detect() must always return at least CPU");
+        let cpu = rows.last().expect("non-empty above");
+        assert_eq!(cpu.id, "cpu", "last row must be the CPU fallback");
+        assert!(cpu.available, "CPU must always be available");
+        assert_eq!(cpu.backend, "cpu");
+        assert_eq!(cpu.provider, "cpu");
+        assert!(cpu.unavailable_reason.is_none());
+    }
+
+    /// Every reported row uses one of the documented bucket ids.
+    #[test]
+    fn bucket_ids_are_well_known() {
+        for row in detect() {
+            assert!(
+                matches!(row.id, "npu" | "gpu" | "cpu"),
+                "unexpected bucket id `{}` for {}",
+                row.id,
+                row.label,
+            );
+        }
+    }
+
+    /// Every unavailable row should also carry an actionable hint.
+    #[test]
+    fn unavailable_rows_have_a_reason() {
+        for row in detect() {
+            if row.available {
+                continue;
+            }
+            assert!(
+                row.unavailable_reason.is_some(),
+                "row `{}` is unavailable but carries no reason",
+                row.label,
+            );
+        }
+    }
+
+    /// Every available `npu`/`gpu` row must declare a non-CPU provider.
+    #[test]
+    fn available_accelerator_rows_dispatch_to_a_real_pipeline() {
+        for row in detect() {
+            if row.id == "cpu" || !row.available {
+                continue;
+            }
+            assert!(
+                matches!(row.provider, "whisper-cpp" | "onnx"),
+                "available row `{}` must dispatch to whisper-cpp or onnx, got {}",
+                row.label,
+                row.provider,
+            );
+        }
+    }
+
+    /// EP probes must never panic — even on hosts where the underlying
+    /// runtime library is missing, the helper returns `Err`.
+    #[test]
+    fn ort_ep_probes_never_panic() {
+        let _ = ort_ep_probe::directml_works();
+        let _ = ort_ep_probe::cuda_works();
+        let _ = ort_ep_probe::openvino_works();
+        let _ = ort_ep_probe::qnn_works();
+        let _ = ort_ep_probe::coreml_works();
+    }
+
+    /// `diagnose()` always emits the platform string + at least one
+    /// EP entry so the UI always has something to show.
+    #[test]
+    fn diagnose_returns_a_useful_report() {
+        let report = diagnose();
+        assert!(!report.platform.is_empty());
+        assert!(
+            !report.entries.is_empty(),
+            "diagnostic report should never be empty"
+        );
+        // The first entry is always the compile-features summary.
+        assert_eq!(report.entries[0].id, "compile-features");
+    }
 }
