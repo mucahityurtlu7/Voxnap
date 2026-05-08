@@ -17,6 +17,51 @@
 
 
 
+## Accelerator pack auto-download (new)
+
+The desktop binary now ships with a **bundle-aware dispatcher** so users
+no longer have to run `pnpm fetch:onnx-model` manually:
+
+* When the user clicks **Download** on a model, the Rust backend first
+  fetches `ggml-<id>.bin` (whisper.cpp), then *automatically* fetches
+  the matching ONNX accelerator pack
+  (`encoder.onnx` + `decoder.onnx` + `tokenizer.json`,
+  optionally `decoder_with_past.onnx`) into
+  `<app-data>/models/onnx/<id>/` in the background.
+* Settings → Model surfaces a per-row **"Hızlandırma paketi"** sub-row
+  that shows the bundle's state (`Sadece CPU` → `İndiriliyor…` →
+  `NPU/GPU hazır`). The same row also lets users manually retry a
+  failed download or remove the pack.
+* The streaming pipeline emits two new event channels:
+  * `voxnap://onnx-bundle-progress` — per-file progress identical in
+    shape to `voxnap://model-download-progress`.
+  * `voxnap://notice` — informational, non-error notices. The first
+    user of this channel is *"shipping you to CPU because the
+    accelerator pack is still downloading"*. The UI renders these as
+    soft info toasts instead of the scary red error toast it used to
+    show for the same situation.
+* `commands::voxnap_start` no longer raises a hard `voxnap://error`
+  when the ONNX bundle is missing. Instead, it falls back to
+  whisper.cpp on CPU, posts a `notice`, and triggers the bundle
+  download in the background so the next recording auto-promotes to
+  NPU/GPU.
+
+The previous *"ONNX bundle for model id `small` (need encoder.onnx) —
+falling back to whisper.cpp on the CPU. Run `pnpm fetch:onnx-model` to
+enable the accelerator path."* error message is gone — it was lying
+about the seriousness of the situation (the session works fine on CPU)
+and nudged the user toward a CLI command they shouldn't need.
+
+New Tauri commands:
+
+| Command                          | Purpose                                                       |
+| -------------------------------- | ------------------------------------------------------------- |
+| `voxnap_download_onnx_bundle`    | Manually start (or retry) an accelerator pack download.       |
+| `voxnap_delete_onnx_bundle`      | Remove the on-disk pack so the next session falls back to CPU.|
+
+`voxnap_list_models` now returns three additional fields per model:
+`onnxBundleReady`, `onnxBundleSizeBytes`, `onnxBundleAvailable`.
+
 ## TL;DR — what changed
 
 Voxnap now ships **two parallel inference pipelines**, picked at runtime

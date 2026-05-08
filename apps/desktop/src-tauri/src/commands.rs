@@ -96,6 +96,61 @@ fn pick_provider(compute_backend: Option<&str>) -> &'static str {
     "whisper-cpp"
 }
 
+/// Like `pick_provider`, but additionally falls back to `"whisper-cpp"`
+/// when `provider == "onnx"` *and* the on-disk ONNX bundle for the
+/// requested model is missing.
+///
+/// This is the dispatcher the recording-start path actually uses. The
+/// original `pick_provider` is kept as the no-context routing primitive
+/// the unit tests pin, while the production code path always goes
+/// through this wrapper so a Windows user who hasn't downloaded the
+/// ONNX bundle yet (the very common "auto-routed to DirectML, but no
+/// `encoder.onnx` on disk" case) gets a clean whisper.cpp session
+/// instead of an "ONNX bundle missing" error.
+///
+/// Returns `(provider, fall_back_reason)`. When `Some`, the caller is
+/// expected to surface a *notice* (not an error) explaining why the
+/// session is currently on CPU and that the accelerator pack is being
+/// downloaded in the background.
+fn pick_provider_with_bundle_check(
+    app: &AppHandle,
+    cfg: &WhisperConfig,
+) -> (&'static str, Option<String>) {
+    let provider = pick_provider(cfg.compute_backend.as_deref());
+    if provider != "onnx" {
+        return (provider, None);
+    }
+    let onnx_cfg = whisper_to_onnx(cfg);
+    match onnx_engine::resolve_model_dir(app, &onnx_cfg) {
+        Ok(_) => (provider, None),
+        Err(e) => {
+            let bucket = cfg.compute_backend.as_deref().unwrap_or("auto");
+            // For an explicit "npu" / "gpu" pin we surface the original
+            // error so the user knows their override won't take effect
+            // until they download the bundle. `auto` callers get the
+            // softer "downloading in background" wording, since the
+            // background download is auto-triggered below.
+            let reason = if bucket == "auto" {
+                format!(
+                    "Hızlandırma paketi henüz indirilmedi ({onnx_id}). \
+                     CPU yolu üzerinden başlatıldı, paket arka planda iniyor — \
+                     bir sonraki kayıtta NPU/GPU otomatik kullanılacak.",
+                    onnx_id = onnx_cfg.model_id,
+                )
+            } else {
+                format!(
+                    "{e}. \"{bucket}\" arka uç henüz hazır değil; CPU yoluna düşüldü. \
+                     Hızlandırma paketi arka planda indiriliyor."
+                )
+            };
+            (
+                "whisper-cpp",
+                Some(reason),
+            )
+        }
+    }
+}
+
 /// Translate a whisper.cpp ggml model id (the JS-side `WhisperModelId`)
 /// into the bare id HuggingFace's optimum ONNX exports use.
 ///
@@ -119,19 +174,11 @@ fn pick_provider(compute_backend: Option<&str>) -> &'static str {
 /// We strip the suffix conservatively — only when the *last* dot-segment
 /// matches the exact `q\d_\d` shape — so any future export that decides
 /// to ship its own suffixes is not silently mangled.
+/// Delegates to `models::whisper_id_to_onnx_id` — single source of truth
+/// for the ggml-id → ONNX-id mapping shared by the dispatcher and the
+/// automatic ONNX bundle download triggered by `voxnap_download_model`.
 fn whisper_id_to_onnx_id(id: &str) -> String {
-    if let Some((head, tail)) = id.rsplit_once('.') {
-        let bytes = tail.as_bytes();
-        let looks_like_quant = bytes.len() == 4
-            && bytes[0] == b'q'
-            && bytes[1].is_ascii_digit()
-            && bytes[2] == b'_'
-            && bytes[3].is_ascii_digit();
-        if looks_like_quant {
-            return head.to_string();
-        }
-    }
-    id.to_string()
+    models::whisper_id_to_onnx_id(id)
 }
 
 /// Convert the JS-side WhisperConfig into the OnnxConfig the parallel
@@ -162,11 +209,34 @@ fn whisper_to_onnx(cfg: &WhisperConfig) -> OnnxConfig {
 
 const EV_STATE: &str = "voxnap://state-change";
 const EV_ERROR: &str = "voxnap://error";
+/// Informational, non-error notice channel. Used for things like
+/// "you're currently on CPU because the accelerator pack is still
+/// downloading" — the session works fine, the user just needs context.
+/// The UI's Topbar renders these as a soft info chip rather than the
+/// scary red error toast `voxnap://error` triggers.
+const EV_NOTICE: &str = "voxnap://notice";
 
 #[derive(Debug, Clone, Serialize)]
 struct EngineErrorPayload {
     code: &'static str,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineNoticePayload {
+    /// Machine-readable id (`accelerator-fallback`,
+    /// `onnx-bundle-downloading`, …) so the UI can choose icons /
+    /// dismiss state without parsing the message.
+    code: &'static str,
+    /// User-facing description (already localised in Turkish on the
+    /// Rust side because Voxnap is shipped TR-first today; the UI is
+    /// free to translate further).
+    message: String,
+    /// Severity hint — `"info"` by default, `"warning"` for things the
+    /// user might want to act on (e.g. an unexpected fallback).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<&'static str>,
 }
 
 /// Validate the model file is reachable up-front so the UI can fail fast
@@ -271,33 +341,43 @@ pub async fn voxnap_start(
     // we'd otherwise emit `ONNX bundle for model id 'base[.q5_1]'
     // (need encoder.onnx)` and never start a session at all.
     //
-    // Probe `onnx_engine::resolve_model_dir` here and *gracefully*
-    // fall back to whisper.cpp when the bundle is missing. We log
-    // the fallback so the UI status badge ("running on NPU") and the
-    // logs stay in sync — the user still gets a working transcript,
-    // just on the CPU path until they run `pnpm fetch:onnx-model`.
-    if provider == "onnx" {
-        let onnx_cfg = whisper_to_onnx(&cfg);
-        if let Err(e) = onnx_engine::resolve_model_dir(&app, &onnx_cfg) {
-            tracing::warn!(
-                error = %e,
-                onnx_model_id = %onnx_cfg.model_id,
-                whisper_model_id = %cfg.model_id,
-                "ONNX bundle missing — falling back to whisper.cpp \
-                 (run `pnpm fetch:onnx-model` to enable the accelerator path)"
-            );
-            let _ = app.emit(
-                EV_ERROR,
-                EngineErrorPayload {
-                    code: "onnx-bundle-missing",
-                    message: format!(
-                        "{e} — falling back to whisper.cpp on the CPU. \
-                         Run `pnpm fetch:onnx-model` to enable the accelerator path."
-                    ),
-                },
-            );
-            provider = "whisper-cpp";
-        }
+    // Routing here goes through `pick_provider_with_bundle_check`,
+    // which probes `onnx_engine::resolve_model_dir` and falls back to
+    // whisper.cpp when the bundle is missing. We *do not* emit a hard
+    // error event in that case anymore (the previous behaviour gave
+    // users a scary red toast for what is actually a happy-path
+    // fallback). Instead, we emit a soft `voxnap://notice` so the UI
+    // can show an info chip and trigger the bundle download in the
+    // background — the next recording will then auto-promote to NPU.
+    let bundle_check = pick_provider_with_bundle_check(&app, &cfg);
+    if let Some(reason) = &bundle_check.1 {
+        provider = bundle_check.0;
+        tracing::info!(
+            reason = %reason,
+            "voxnap_start: accelerator bundle missing, falling back to whisper.cpp"
+        );
+        let _ = app.emit(
+            EV_NOTICE,
+            EngineNoticePayload {
+                code: "accelerator-fallback",
+                message: reason.clone(),
+                severity: Some("info"),
+            },
+        );
+        // Kick off the ONNX bundle download in the background so the
+        // *next* session can promote to NPU/GPU without the user doing
+        // anything. The function is idempotent — a no-op when the
+        // bundle is already on disk or already downloading.
+        let app_for_bg = app.clone();
+        let model_for_bg = cfg.model_id.clone();
+        tokio::spawn(async move {
+            models::download_onnx_bundle(app_for_bg, model_for_bg).await;
+        });
+    } else {
+        // Even if the dispatcher kept `provider` unchanged, honour the
+        // bundle-aware decision (e.g. when a user pinned `cpu` we
+        // already returned early from the wrapper).
+        provider = bundle_check.0;
     }
 
     let whisper_handle = match provider {
@@ -432,6 +512,37 @@ pub async fn voxnap_delete_model(
     #[allow(non_snake_case)] modelId: String,
 ) -> Result<()> {
     models::delete_model(&app, &modelId).await
+}
+
+/// Manually trigger an ONNX accelerator-bundle download. The UI exposes
+/// this from `ModelManagerPanel` ("Hızlandırmayı indir" button) so the
+/// user can pre-warm the NPU/GPU path without waiting for it to be
+/// auto-triggered on the first recording. The function is fire-and-
+/// forget — progress lands on the `voxnap://onnx-bundle-progress`
+/// channel and the on-disk state is reflected by the next
+/// `voxnap_list_models` call.
+#[tauri::command]
+pub async fn voxnap_download_onnx_bundle(
+    app: AppHandle,
+    #[allow(non_snake_case)] modelId: String,
+) -> Result<()> {
+    // We deliberately don't await the download here — the UI just wants
+    // to know "yes, I started it"; the bundle can be hundreds of MB.
+    tokio::spawn(async move {
+        models::download_onnx_bundle(app, modelId).await;
+    });
+    Ok(())
+}
+
+/// Delete the ONNX accelerator bundle for `modelId`. Best-effort: if
+/// the bundle isn't on disk we still return Ok so the UI can treat it
+/// as idempotent.
+#[tauri::command]
+pub async fn voxnap_delete_onnx_bundle(
+    app: AppHandle,
+    #[allow(non_snake_case)] modelId: String,
+) -> Result<()> {
+    models::delete_onnx_bundle(&app, &modelId).await
 }
 
 // ────────────────────────────────────────────────────────────────────────────

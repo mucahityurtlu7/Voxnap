@@ -96,6 +96,33 @@ open `graphify-out/graph.html`. The repo also ships project-level MCP configs
 (VS Code, Antigravity, Gemini CLI, Claude Code, Cursor, Windsurf) so any of
 those assistants can query the graph directly. See [`docs/graphify.md`](./docs/graphify.md).
 
+## Summariser abstraction
+
+Live AI summaries go through `ISummarizer` (see
+`packages/core/src/ai/ISummarizer.ts`). Two implementations ship today:
+
+- **`HeuristicSummarizer`** — multilingual, on-device, zero-network.
+  Does TF-IDF sentence scoring + MMR-diverse bullets +
+  abbreviation-aware Turkish/English/German/Spanish/French/Italian
+  segmentation. This is the default in every `apps/*/src/main.tsx` and
+  the only summariser the desktop / mobile shells need (no API key).
+- **`MockSummarizer`** — deprecated re-export of the heuristic one;
+  kept for backwards compatibility with old call sites.
+
+Real LLM bridges (OpenAI, Anthropic, llama.cpp, Ollama) plug in by
+implementing `ISummarizer` and being injected through
+`<SummarizerProvider summarizer={…}>`. Don't add cloud-API calls inside
+`HeuristicSummarizer` itself — keep it strictly on-device.
+
+## Notice vs error events
+
+Soft, non-fatal engine messages travel on **`voxnap://notice`** and end
+up in the `notice` slot on `EngineEventMap`. The UI renders them as
+info toasts. The hard `voxnap://error` channel stays reserved for
+things that genuinely break the session (model file missing, mic
+permission denied, …). Don't reach for `voxnap://error` when a fallback
+covered the user's request — emit a notice instead.
+
 ## When in doubt
 
 - Adding a feature that touches audio? It belongs in **`packages/core`** if

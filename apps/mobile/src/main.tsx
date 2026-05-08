@@ -9,9 +9,9 @@ import "./index.css";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import {
+  HeuristicSummarizer,
   MemorySessionStore,
   MOCK_SESSIONS,
-  MockSummarizer,
   TauriEngine,
   TauriModelManager,
 } from "@voxnap/core";
@@ -26,7 +26,7 @@ import {
 
 const engine = new TauriEngine();
 const modelManager = new TauriModelManager();
-const summarizer = new MockSummarizer();
+const summarizer = new HeuristicSummarizer();
 const sessionStore = new MemorySessionStore({ seed: MOCK_SESSIONS });
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

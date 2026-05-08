@@ -23,10 +23,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import {
   DEFAULT_MODEL,
+  HeuristicSummarizer,
   MicCapture,
   MockEngine,
   MockModelManager,
-  MockSummarizer,
   MemorySessionStore,
   MOCK_SESSIONS,
   WasmEngine,
@@ -90,7 +90,7 @@ function createEngine(): ITranscriptionEngine {
 }
 
 const engine = createEngine();
-const summarizer = new MockSummarizer();
+const summarizer = new HeuristicSummarizer();
 const sessionStore = new MemorySessionStore({ seed: MOCK_SESSIONS });
 
 // On the web, the WasmEngine itself handles model fetching via

@@ -53,6 +53,13 @@ export class MockModelManager implements IModelManager {
         englishOnly: m.englishOnly,
         downloaded: isDownloaded,
         sizeBytes: isDownloaded ? m.approxSizeMb * 1024 * 1024 : undefined,
+        // The mock manager doesn't model a separate accelerator pipeline
+        // (the web `WasmEngine` fetches ONNX itself), so we explicitly
+        // mark the bundle as unavailable. The UI then hides the
+        // "Hızlandırma paketi" sub-row entirely instead of teasing a
+        // download that will never run.
+        onnxBundleAvailable: false,
+        onnxBundleReady: false,
       };
     });
   }

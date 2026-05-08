@@ -80,6 +80,8 @@ export function LiveTranscribePage({
   const { push: toast } = useToasts();
   const lastError = useTranscriptionStore((s) => s.lastError);
   const clearError = useTranscriptionStore((s) => s.setError);
+  const lastNotice = useTranscriptionStore((s) => s.lastNotice);
+  const clearNotice = useTranscriptionStore((s) => s.setNotice);
 
   // Seed the input device from the onboarding store so the user's first
   // recording uses the mic they verified during the welcome wizard.
@@ -132,6 +134,22 @@ export function LiveTranscribePage({
     const id = setTimeout(() => clearError(null), 0);
     return () => clearTimeout(id);
   }, [lastError, toast, clearError]);
+
+  // Surface non-error engine notices (e.g. "running on CPU until the
+  // accelerator pack finishes downloading") as soft info toasts. The
+  // notice channel is intentionally separate from `error` so we never
+  // show a red banner for what is actually a graceful fallback.
+  useEffect(() => {
+    if (!lastNotice) return;
+    toast({
+      title: noticeTitleFor(lastNotice.code),
+      description: lastNotice.message,
+      tone: lastNotice.severity === "warning" ? "warning" : "info",
+      duration: 7000,
+    });
+    const id = setTimeout(() => clearNotice(null), 0);
+    return () => clearTimeout(id);
+  }, [lastNotice, toast, clearNotice]);
 
   // Initialise the engine on first mount, and re-initialise it any time
   // the user picks a different model / language / translate option from
@@ -521,6 +539,23 @@ function errorTitleFor(code: string): string {
       return "Not supported on this device";
     default:
       return "Engine error";
+  }
+}
+
+/**
+ * Friendly title for `voxnap://notice` events. Notices are non-fatal
+ * (the session is still running) so the title leans toward
+ * "informational" wording rather than the alarm-bell tone we use for
+ * `voxnap://error`.
+ */
+function noticeTitleFor(code: string): string {
+  switch (code) {
+    case "accelerator-fallback":
+      return "Şu an CPU'da çalışıyor";
+    case "onnx-bundle-downloading":
+      return "Hızlandırma paketi indiriliyor";
+    default:
+      return "Bilgi";
   }
 }
 

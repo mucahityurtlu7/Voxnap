@@ -72,6 +72,8 @@ pub fn run() {
             commands::voxnap_download_model,
             commands::voxnap_cancel_download,
             commands::voxnap_delete_model,
+            commands::voxnap_download_onnx_bundle,
+            commands::voxnap_delete_onnx_bundle,
         ])
         .setup(|app| {
             tracing::info!(

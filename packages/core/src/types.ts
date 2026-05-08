@@ -280,8 +280,8 @@ export interface AiProviderInfo {
 }
 
 export const AI_PROVIDERS: Record<AiProvider, AiProviderInfo> = {
-  mock: { id: "mock", label: "Voxnap Mock", local: true, needsApiKey: false },
-  local: { id: "local", label: "On-device (llama.cpp)", local: true, needsApiKey: false },
+  mock: { id: "mock", label: "Voxnap (on-device)", local: true, needsApiKey: false },
+  local: { id: "local", label: "On-device LLM (llama.cpp)", local: true, needsApiKey: false },
   openai: { id: "openai", label: "OpenAI", local: false, needsApiKey: true },
   anthropic: { id: "anthropic", label: "Anthropic", local: false, needsApiKey: true },
   ollama: { id: "ollama", label: "Ollama (LAN)", local: true, needsApiKey: false },

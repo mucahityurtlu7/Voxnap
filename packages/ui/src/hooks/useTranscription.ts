@@ -42,6 +42,7 @@ export function useTranscription(): UseTranscriptionApi {
 
   const setEngineState = useTranscriptionStore((s) => s.setEngineState);
   const setError = useTranscriptionStore((s) => s.setError);
+  const setNotice = useTranscriptionStore((s) => s.setNotice);
   const setLevel = useTranscriptionStore((s) => s.setLevel);
   const upsert = useTranscriptionStore((s) => s.upsertSegment);
   const clear = useTranscriptionStore((s) => s.clear);
@@ -62,14 +63,24 @@ export function useTranscription(): UseTranscriptionApi {
       );
       setError(err);
     });
+    // Soft, informational engine notices (e.g. "running on CPU because
+    // accelerator pack is still downloading"). We surface them through a
+    // separate store field so the UI can render them as info toasts
+    // instead of the scary red error surface.
+    const offNotice = engine.on("notice", (n) => {
+      // eslint-disable-next-line no-console
+      console.info(`[voxnap] engine notice (${n.code}): ${n.message}`);
+      setNotice(n);
+    });
     const offLvl = engine.on("audio-level", setLevel);
     return () => {
       offSeg();
       offState();
       offErr();
+      offNotice();
       offLvl();
     };
-  }, [engine, upsert, setEngineState, setError, setLevel]);
+  }, [engine, upsert, setEngineState, setError, setNotice, setLevel]);
 
 
   const init = useCallback(

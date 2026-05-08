@@ -498,6 +498,20 @@ fn decode_refeed(
 /// O(n) fast path: uses `decoder.onnx` once for the prefix to seed
 /// the KV cache, then loops on `decoder_with_past.onnx` feeding only
 /// the newest token + the cached attention keys/values per layer.
+///
+/// **Optimum/Xenova export quirks** the dispatcher has to handle:
+///
+/// 1. `decoder_with_past.onnx` typically *doesn't* declare
+///    `encoder_hidden_states` as an input — the encoder cross-attention
+///    keys/values live entirely in the `past_key_values.<L>.encoder.*`
+///    tensors, and feeding `encoder_hidden_states` again triggers
+///    `Invalid input name: encoder_hidden_states` from ORT. We probe
+///    `kv_decoder.inputs()` once and only pass it when the graph
+///    actually accepts it.
+/// 2. `decoder_with_past.onnx` only emits `present.<L>.decoder.*`
+///    outputs (the encoder KV is static after the first step), so the
+///    encoder past_key_values must be **carried forward verbatim**
+///    every iteration instead of being rebuilt from `present.*`.
 fn decode_with_kv_cache(
     decoder: &mut ort::session::Session,
     kv_decoder: &mut ort::session::Session,
@@ -507,6 +521,15 @@ fn decode_with_kv_cache(
     max_steps: usize,
     emitted: &mut Vec<u32>,
 ) -> Result<()> {
+    // Probe the KV decoder's input signature once. Most Optimum exports
+    // refuse `encoder_hidden_states` here because the encoder cross-attn
+    // is folded into `past_key_values.<L>.encoder.*`; a few re-export
+    // it though, so don't hard-code either way.
+    let kv_accepts_encoder_hidden = kv_decoder
+        .inputs()
+        .iter()
+        .any(|outlet| outlet.name() == "encoder_hidden_states");
+
     // ── Initial pass: seeds the KV cache.
     let prefix_arr = Array2::<i64>::from_shape_vec((1, prefix_ids.len()), prefix_ids.clone())
         .map_err(|e| Error::Other(format!("decoder prefix shape: {e}")))?;
@@ -529,15 +552,37 @@ fn decode_with_kv_cache(
     emitted.push(next_id);
 
     // Drain "present.*" tensors out of the initial outputs into a
-    // map keyed by their "past_key_values.*" rename.
-    let mut past_kv: Vec<(String, ndarray::ArrayD<f32>)> = Vec::new();
+    // map keyed by their "past_key_values.*" rename. We tag each entry
+    // as either "encoder" (carried forward verbatim — `decoder_with_past`
+    // doesn't re-emit these) or "decoder" (refreshed every iteration
+    // from the new `present.*` outputs).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum KvKind {
+        Encoder,
+        Decoder,
+    }
+
+    fn classify(name: &str) -> KvKind {
+        // Optimum names them like `past_key_values.<L>.encoder.key`
+        // and `past_key_values.<L>.decoder.value`; fall back to
+        // Decoder on anything weird so we still refresh it.
+        if name.contains(".encoder.") {
+            KvKind::Encoder
+        } else {
+            KvKind::Decoder
+        }
+    }
+
+    let mut past_kv: Vec<(String, KvKind, ndarray::ArrayD<f32>)> = Vec::new();
     for (name, value) in initial_outputs.iter() {
         if let Some(stripped) = name.strip_prefix("present") {
             let arr = value
                 .try_extract_array::<f32>()
                 .map_err(|e| Error::Other(format!("present extract {name}: {e}")))?
                 .into_owned();
-            past_kv.push((format!("past_key_values{stripped}"), arr));
+            let renamed = format!("past_key_values{stripped}");
+            let kind = classify(&renamed);
+            past_kv.push((renamed, kind, arr));
         }
     }
     if past_kv.is_empty() {
@@ -547,45 +592,57 @@ fn decode_with_kv_cache(
     }
 
     for _ in 0..max_steps - 1 {
-            // Build the next-step input: one new token + every past KV.
-            let single_input = Array2::<i64>::from_shape_vec((1, 1), vec![next_id as i64])
-                .map_err(|e| Error::Other(format!("decoder step shape: {e}")))?;
+        // Build the next-step input: one new token + every past KV.
+        let single_input = Array2::<i64>::from_shape_vec((1, 1), vec![next_id as i64])
+            .map_err(|e| Error::Other(format!("decoder step shape: {e}")))?;
 
-            // Stash tensor refs in vecs so they outlive the inputs! call.
-            let mut kv_refs: Vec<(String, TensorRef<'_, f32>)> = Vec::with_capacity(past_kv.len());
-            for (name, arr) in past_kv.iter() {
-                let t = TensorRef::from_array_view(arr)
-                    .map_err(|e| Error::Other(format!("past_kv tensor {name}: {e}")))?;
-                kv_refs.push((name.clone(), t));
-            }
-            let single_tensor = TensorRef::from_array_view(&single_input)
-                .map_err(|e| Error::Other(format!("step ids tensor: {e}")))?;
-            let enc_tensor = TensorRef::from_array_view(encoder_states)
-                .map_err(|e| Error::Other(format!("step encoder tensor: {e}")))?;
+        // Stash tensor refs in vecs so they outlive the inputs! call.
+        let mut kv_refs: Vec<(String, TensorRef<'_, f32>)> = Vec::with_capacity(past_kv.len());
+        for (name, _kind, arr) in past_kv.iter() {
+            let t = TensorRef::from_array_view(arr)
+                .map_err(|e| Error::Other(format!("past_kv tensor {name}: {e}")))?;
+            kv_refs.push((name.clone(), t));
+        }
+        let single_tensor = TensorRef::from_array_view(&single_input)
+            .map_err(|e| Error::Other(format!("step ids tensor: {e}")))?;
 
-            // Build the heterogeneous SessionInputs map. We use the Vec
-            // variant because the number of past_kv entries is dynamic
-            // (depends on the model's layer count).
-            let mut inputs: Vec<(std::borrow::Cow<'_, str>, ort::session::SessionInputValue<'_>)> =
-                Vec::with_capacity(2 + kv_refs.len());
-            inputs.push((
-                "input_ids".into(),
-                ort::session::SessionInputValue::from(single_tensor),
-            ));
+        // Build the heterogeneous SessionInputs map. We use the Vec
+        // variant because the number of past_kv entries is dynamic
+        // (depends on the model's layer count).
+        let mut inputs: Vec<(std::borrow::Cow<'_, str>, ort::session::SessionInputValue<'_>)> =
+            Vec::with_capacity(2 + kv_refs.len());
+        inputs.push((
+            "input_ids".into(),
+            ort::session::SessionInputValue::from(single_tensor),
+        ));
+        // Only feed `encoder_hidden_states` when the KV-cache decoder
+        // actually advertises it as an input. Optimum/Xenova exports
+        // typically don't, and ORT will reject the extra key with
+        // `Invalid input name: encoder_hidden_states`.
+        let enc_tensor_opt = if kv_accepts_encoder_hidden {
+            Some(
+                TensorRef::from_array_view(encoder_states)
+                    .map_err(|e| Error::Other(format!("step encoder tensor: {e}")))?,
+            )
+        } else {
+            None
+        };
+        if let Some(enc_tensor) = enc_tensor_opt {
             inputs.push((
                 "encoder_hidden_states".into(),
                 ort::session::SessionInputValue::from(enc_tensor),
             ));
-            for (name, t) in kv_refs.into_iter() {
-                inputs.push((
-                    std::borrow::Cow::Owned(name),
-                    ort::session::SessionInputValue::from(t),
-                ));
-            }
+        }
+        for (name, t) in kv_refs.into_iter() {
+            inputs.push((
+                std::borrow::Cow::Owned(name),
+                ort::session::SessionInputValue::from(t),
+            ));
+        }
 
-            let outputs = kv_decoder
-                .run(inputs)
-                .map_err(|e| Error::Other(format!("decoder_with_past.run: {e}")))?;
+        let outputs = kv_decoder
+            .run(inputs)
+            .map_err(|e| Error::Other(format!("decoder_with_past.run: {e}")))?;
 
         next_id = pick_next_token(&outputs)?;
         if tokenizer.is_terminal(next_id) {
@@ -593,16 +650,42 @@ fn decode_with_kv_cache(
         }
         emitted.push(next_id);
 
-        // Roll the KV cache forward for the next step.
-        past_kv.clear();
+        // Roll the KV cache forward for the next step. `decoder_with_past`
+        // only re-emits `present.<L>.decoder.*`; the encoder entries are
+        // static for the whole utterance, so we keep the existing copies
+        // and just splice in the refreshed decoder ones.
+        let mut next_decoder_kv: Vec<(String, KvKind, ndarray::ArrayD<f32>)> = Vec::new();
         for (name, value) in outputs.iter() {
             if let Some(stripped) = name.strip_prefix("present") {
                 let arr = value
                     .try_extract_array::<f32>()
                     .map_err(|e| Error::Other(format!("present extract {name}: {e}")))?
                     .into_owned();
-                past_kv.push((format!("past_key_values{stripped}"), arr));
+                let renamed = format!("past_key_values{stripped}");
+                let kind = classify(&renamed);
+                next_decoder_kv.push((renamed, kind, arr));
             }
+        }
+
+        if next_decoder_kv.is_empty() {
+            // Bundle re-emits nothing — fall back to keeping the cache
+            // exactly as we had it. (Pathological export, but harmless:
+            // means we'd be re-using stale decoder KV which is wrong
+            // but would only show up as accuracy loss, not a crash.)
+            tracing::warn!(
+                "decoder_with_past.onnx emitted no `present.*` outputs; \
+                 KV cache will go stale this step"
+            );
+        } else if next_decoder_kv.iter().any(|(_, k, _)| *k == KvKind::Encoder) {
+            // Some exports *do* re-emit encoder KV every step. In that
+            // case just replace everything wholesale.
+            past_kv = next_decoder_kv;
+        } else {
+            // Standard Optimum case: only decoder KV came back. Keep
+            // the encoder entries from the seed pass and replace the
+            // decoder ones in-place.
+            past_kv.retain(|(_, kind, _)| *kind == KvKind::Encoder);
+            past_kv.extend(next_decoder_kv);
         }
     }
     Ok(())

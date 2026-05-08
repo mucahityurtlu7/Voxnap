@@ -52,6 +52,13 @@ export const TAURI_EVENTS = {
   audioLevel: "voxnap://audio-level",
   stateChange: "voxnap://state-change",
   error: "voxnap://error",
+  /**
+   * Soft, informational notices the Rust side emits for non-error
+   * fallbacks (e.g. "ONNX bundle missing — running on CPU until the
+   * accelerator pack finishes downloading"). The UI surfaces these as
+   * a quiet info chip rather than a red error toast.
+   */
+  notice: "voxnap://notice",
 } as const;
 
 /** Shape Rust emits for `voxnap://segment` (camelCase via serde rename_all). */
@@ -69,6 +76,13 @@ interface RustSegmentPayload {
 interface RustErrorPayload {
   code: EngineError["code"];
   message: string;
+}
+
+/** Shape Rust emits for `voxnap://notice`. */
+interface RustNoticePayload {
+  code: string;
+  message: string;
+  severity?: "info" | "warning";
 }
 
 export class TauriEngine extends EngineEmitter implements ITranscriptionEngine {
@@ -122,6 +136,16 @@ export class TauriEngine extends EngineEmitter implements ITranscriptionEngine {
           payload,
         );
         this.emit("error", err);
+      }),
+      await listen<RustNoticePayload>(TAURI_EVENTS.notice, (e) => {
+        const p = e.payload;
+        // eslint-disable-next-line no-console
+        console.info(`[voxnap.tauri] notice (${p.code}): ${p.message}`);
+        this.emit("notice", {
+          code: p.code,
+          message: p.message,
+          severity: p.severity,
+        });
       }),
     );
   }

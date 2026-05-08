@@ -14,11 +14,21 @@ import type {
   EngineState,
   TranscriptionSegment,
 } from "../types.js";
+import type { EngineNotice } from "../engine/ITranscriptionEngine.js";
 
 export interface TranscriptionState {
   // -- engine status -----------------------------------------------------
   engineState: EngineState;
   lastError: EngineError | null;
+  /**
+   * Latest non-error notice the engine emitted (e.g. "running on CPU
+   * because the accelerator pack is still downloading"). The UI reads
+   * this and shows a soft info toast — distinct from `lastError`, which
+   * triggers the red "something went wrong" surface.
+   *
+   * Cleared when the user dismisses the toast or on `clear()`.
+   */
+  lastNotice: EngineNotice | null;
 
   // -- session content ---------------------------------------------------
   /** Already-finalised segments, in chronological order. */
@@ -32,6 +42,7 @@ export interface TranscriptionState {
   // -- mutators ----------------------------------------------------------
   setEngineState: (s: EngineState) => void;
   setError: (e: EngineError | null) => void;
+  setNotice: (n: EngineNotice | null) => void;
   upsertSegment: (segment: TranscriptionSegment) => void;
   setLevel: (l: AudioLevel) => void;
   clear: () => void;
@@ -40,12 +51,14 @@ export interface TranscriptionState {
 export const useTranscriptionStore = create<TranscriptionState>((set) => ({
   engineState: "idle",
   lastError: null,
+  lastNotice: null,
   finals: [],
   interim: null,
   level: null,
 
   setEngineState: (engineState) => set({ engineState }),
   setError: (lastError) => set({ lastError }),
+  setNotice: (lastNotice) => set({ lastNotice }),
   setLevel: (level) => set({ level }),
 
   upsertSegment: (segment) =>
@@ -71,7 +84,7 @@ export const useTranscriptionStore = create<TranscriptionState>((set) => ({
       return { finals, interim: null };
     }),
 
-  clear: () => set({ finals: [], interim: null, lastError: null }),
+  clear: () => set({ finals: [], interim: null, lastError: null, lastNotice: null }),
 }));
 
 /** Concatenate all finalised segments into a single transcript string. */

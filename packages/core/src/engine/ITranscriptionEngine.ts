@@ -17,11 +17,27 @@ import type {
   TranscriptionSegment,
 } from "../types.js";
 
+/**
+ * Soft, informational notice — not an error. Used by the engine to tell
+ * the UI things like "we couldn't use the NPU yet because the
+ * accelerator pack is still downloading; running on CPU in the
+ * meantime". The UI renders these as a quiet info chip rather than the
+ * scary red toast the `error` channel triggers.
+ */
+export interface EngineNotice {
+  /** Stable id for icon/dismiss handling (e.g. `"accelerator-fallback"`). */
+  code: string;
+  message: string;
+  /** Defaults to `"info"` when omitted. */
+  severity?: "info" | "warning";
+}
+
 export type EngineEventMap = {
   segment: TranscriptionSegment;
   "audio-level": AudioLevel;
   "state-change": EngineState;
   error: EngineError;
+  notice: EngineNotice;
 };
 
 export type EngineEventName = keyof EngineEventMap;

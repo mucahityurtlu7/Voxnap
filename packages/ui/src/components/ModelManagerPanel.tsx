@@ -31,11 +31,13 @@ import {
   X as XIcon,
   AlertTriangle,
   RefreshCw,
+  Zap,
 } from "lucide-react";
 import {
   DEFAULT_MODEL,
   type ModelDownloadProgress,
   type ModelStatus,
+  type OnnxBundleProgress,
   type WhisperModelId,
 } from "@voxnap/core";
 
@@ -63,10 +65,14 @@ export function ModelManagerPanel({
     statuses,
     hydrated,
     lastError,
+    supportsOnnxBundle,
     download,
     cancel,
     remove,
+    downloadOnnxBundle,
+    deleteOnnxBundle,
     getProgress,
+    getOnnxProgress,
     refresh,
   } = useModels();
 
@@ -106,11 +112,15 @@ export function ModelManagerPanel({
             key={m.id}
             model={m}
             progress={getProgress(m.id)}
+            onnxProgress={getOnnxProgress(m.id)}
+            supportsOnnxBundle={supportsOnnxBundle}
             selected={!hideSelectionState && selectedModelId === m.id}
             onSelect={onSelect}
             onDownload={() => void download(m.id)}
             onCancel={() => void cancel(m.id)}
             onDelete={() => void remove(m.id)}
+            onDownloadOnnx={() => void downloadOnnxBundle(m.id)}
+            onDeleteOnnx={() => void deleteOnnxBundle(m.id)}
           />
         ))}
       </ul>
@@ -121,21 +131,29 @@ export function ModelManagerPanel({
 interface ModelRowProps {
   model: ModelStatus;
   progress?: ModelDownloadProgress;
+  onnxProgress?: OnnxBundleProgress;
+  supportsOnnxBundle: boolean;
   selected: boolean;
   onSelect?: (id: WhisperModelId) => void;
   onDownload: () => void;
   onCancel: () => void;
   onDelete: () => void;
+  onDownloadOnnx: () => void;
+  onDeleteOnnx: () => void;
 }
 
 function ModelRow({
   model,
   progress,
+  onnxProgress,
+  supportsOnnxBundle,
   selected,
   onSelect,
   onDownload,
   onCancel,
   onDelete,
+  onDownloadOnnx,
+  onDeleteOnnx,
 }: ModelRowProps) {
   const isDownloading =
     progress?.state === "downloading" || progress?.state === "starting";
@@ -274,7 +292,200 @@ function ModelRow({
       {(isDownloading || isError) && progress && (
         <DownloadProgressStrip progress={progress} />
       )}
+
+      {/*
+       * Accelerator pack ("hızlandırma paketi") row.
+       *
+       * Only shown when:
+       *   • the active manager supports ONNX bundle commands at all
+       *     (web build doesn't), and
+       *   • a Xenova ONNX mirror exists for this model id.
+       *
+       * The ggml model itself doesn't need to be downloaded yet —
+       * the user can pre-download the accelerator pack alongside.
+       * That said we hide the *download* CTA when the parent ggml
+       * is currently downloading because the Rust backend will
+       * auto-trigger the bundle download once the ggml is done; a
+       * second click would just race against the auto-spawn.
+       */}
+      {supportsOnnxBundle && model.onnxBundleAvailable !== false && (
+        <OnnxBundleRow
+          model={model}
+          progress={onnxProgress}
+          parentDownloading={isDownloading}
+          onDownload={onDownloadOnnx}
+          onDelete={onDeleteOnnx}
+        />
+      )}
     </li>
+  );
+}
+
+interface OnnxBundleRowProps {
+  model: ModelStatus;
+  progress?: OnnxBundleProgress;
+  parentDownloading: boolean;
+  onDownload: () => void;
+  onDelete: () => void;
+}
+
+function OnnxBundleRow({
+  model,
+  progress,
+  parentDownloading,
+  onDownload,
+  onDelete,
+}: OnnxBundleRowProps) {
+  const isReady = model.onnxBundleReady === true;
+  const isActive =
+    progress?.state === "starting" || progress?.state === "downloading";
+  const isError = progress?.state === "error";
+  const isSkipped = progress?.state === "skipped";
+
+  const sizeLabel = (() => {
+    if (model.onnxBundleSizeBytes && model.onnxBundleSizeBytes > 0) {
+      return formatBytes(model.onnxBundleSizeBytes);
+    }
+    return null;
+  })();
+
+  return (
+    <div
+      className={clsx(
+        "flex flex-col gap-1.5 rounded-lg border border-dashed p-2",
+        isReady
+          ? "border-emerald-500/40 bg-emerald-500/5"
+          : isActive
+            ? "border-brand-500/40 bg-brand-500/5"
+            : isError
+              ? "border-rose-500/40 bg-rose-500/5"
+              : "border-border bg-surface-3/40",
+      )}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center gap-2">
+        <Zap
+          className={clsx(
+            "h-3.5 w-3.5 shrink-0",
+            isReady
+              ? "text-emerald-500"
+              : isActive
+                ? "text-brand-500"
+                : isError
+                  ? "text-rose-500"
+                  : "text-muted",
+          )}
+        />
+        <div className="min-w-0 flex-1 text-[11px]">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-medium text-text">Hızlandırma paketi</span>
+            {isReady ? (
+              <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                NPU/GPU hazır
+              </span>
+            ) : isActive ? (
+              <span className="rounded-full bg-brand-500/15 px-1.5 py-0.5 text-[10px] font-medium text-brand-600 dark:text-brand-400">
+                İndiriliyor…
+              </span>
+            ) : isSkipped ? (
+              <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                Mevcut değil
+              </span>
+            ) : isError ? (
+              <span className="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-medium text-rose-600 dark:text-rose-400">
+                Hata
+              </span>
+            ) : (
+              <span className="rounded-full bg-surface-3 px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                Sadece CPU
+              </span>
+            )}
+            {sizeLabel && (
+              <span className="font-mono text-[10px] text-muted">{sizeLabel}</span>
+            )}
+          </div>
+          <div className="mt-0.5 text-[10px] text-text-subtle">
+            {isReady
+              ? "ONNX paketi diskinde — sonraki kayıtta NPU/GPU otomatik kullanılır."
+              : isActive
+                ? progress?.file
+                  ? `${progress.file} indiriliyor…`
+                  : "Hızlandırma paketi indiriliyor…"
+                : isSkipped
+                  ? (progress?.message ??
+                    "Bu model için ONNX yansısı yok. CPU yolu yine de tam çalışır.")
+                  : isError
+                    ? (progress?.message ?? "İndirme başarısız oldu.")
+                    : parentDownloading
+                      ? "ggml modeli indikten sonra otomatik başlayacak."
+                      : "NPU/GPU hızlandırması için isteğe bağlı bir paket. ~150-300 MB."}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {isReady ? (
+            <button
+              type="button"
+              onClick={() => {
+                const ok =
+                  typeof window === "undefined" ||
+                  window.confirm(
+                    `${model.label} için hızlandırma paketini sil? Sonraki kayıt CPU'ya düşecek.`,
+                  );
+                if (ok) onDelete();
+              }}
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] text-text-subtle hover:bg-surface-2 hover:text-text"
+            >
+              <Trash2 className="h-3 w-3" /> Sil
+            </button>
+          ) : isActive ? null : isSkipped ? null : (
+            <button
+              type="button"
+              onClick={onDownload}
+              disabled={parentDownloading}
+              className={clsx(
+                "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium transition-colors",
+                parentDownloading
+                  ? "cursor-not-allowed border-border bg-surface-2 text-muted"
+                  : "border-brand-500/40 bg-brand-500/10 text-brand-600 hover:bg-brand-500/20 dark:text-brand-400",
+              )}
+              title={
+                parentDownloading
+                  ? "ggml indirimi bittikten sonra otomatik başlar"
+                  : isError
+                    ? "Tekrar dene"
+                    : "Hızlandırmayı indir"
+              }
+            >
+              <CloudDownload className="h-3 w-3" />
+              {isError ? "Tekrar dene" : "İndir"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {isActive && progress && (
+        <div className="flex flex-col gap-1">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-surface-3">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-brand-400 to-brand-600 transition-[width] duration-200"
+              style={{
+                width: `${(progress.percent * 100).toFixed(2)}%`,
+              }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[10px] text-muted">
+            <span>
+              {progress.totalBytes > 0
+                ? `${formatBytes(progress.receivedBytes)} / ${formatBytes(progress.totalBytes)}`
+                : formatBytes(progress.receivedBytes)}
+            </span>
+            <span>
+              Dosya {progress.fileIndex + 1}/{progress.fileCount}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
