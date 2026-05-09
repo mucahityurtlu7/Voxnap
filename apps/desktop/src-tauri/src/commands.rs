@@ -251,6 +251,7 @@ pub async fn voxnap_init(
         model_id = %config.model_id,
         language = %config.language,
         translate = config.translate,
+        compute_backend = %config.compute_backend.as_deref().unwrap_or("auto"),
         "voxnap_init"
     );
     let _ = app.emit(EV_STATE, "loading-model");
@@ -270,11 +271,65 @@ pub async fn voxnap_init(
         return Err(e);
     }
 
+    // Eagerly check the ONNX accelerator bundle. The user has just
+    // committed to a `compute_backend` (typically by flipping the
+    // Settings → Compute picker off "auto"), so this is the right
+    // moment to surface "you'll be on CPU until the accelerator pack
+    // finishes downloading". We do this *before* the first
+    // `voxnap_start` so the soft notice + background download are
+    // already in flight by the time the user hits the mic — without
+    // this, the very first session would silently run on CPU even
+    // though the user explicitly asked for GPU/NPU.
+    //
+    // The check mirrors the routing the recording path performs in
+    // `pick_provider_with_bundle_check`. We deliberately don't error
+    // out here: a missing bundle is a soft fallback, not a fatal
+    // condition.
+    let init_provider = pick_provider(config.compute_backend.as_deref());
+    if init_provider == "onnx" {
+        let onnx_cfg = whisper_to_onnx(&config);
+        if onnx_engine::resolve_model_dir(&app, &onnx_cfg).is_err() {
+            let bucket = config.compute_backend.as_deref().unwrap_or("auto");
+            let reason = if bucket == "auto" {
+                format!(
+                    "Hızlandırma paketi henüz indirilmedi ({onnx_id}). \
+                     CPU üzerinde başlatıldı, paket arka planda iniyor — \
+                     indirme bittiğinde kayıtlar otomatik olarak NPU/GPU'ya geçecek.",
+                    onnx_id = onnx_cfg.model_id,
+                )
+            } else {
+                format!(
+                    "\"{bucket}\" arka uç için hızlandırma paketi henüz hazır değil. \
+                     Voxnap CPU üzerinde başlatıldı; \
+                     paket arka planda indiriliyor ve sonraki kayıt {bucket}'da çalışacak."
+                )
+            };
+            let _ = app.emit(
+                EV_NOTICE,
+                EngineNoticePayload {
+                    code: "accelerator-fallback",
+                    message: reason,
+                    severity: Some("info"),
+                },
+            );
+            // Kick off the bundle download in the background so the
+            // user doesn't have to wait through `voxnap_start` for it
+            // to start. `download_onnx_bundle` is idempotent — a
+            // no-op if it's already on disk or already downloading.
+            let app_for_bg = app.clone();
+            let model_for_bg = config.model_id.clone();
+            tokio::spawn(async move {
+                models::download_onnx_bundle(app_for_bg, model_for_bg).await;
+            });
+        }
+    }
+
     *state.config.lock().await = Some(config);
     let _ = app.emit(EV_STATE, "ready");
     tracing::info!("voxnap_init: ready");
     Ok(())
 }
+
 
 
 #[tauri::command]

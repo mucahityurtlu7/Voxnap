@@ -404,15 +404,16 @@ function AiSection() {
       <Toggle
         checked={liveAi}
         onChange={setLiveAi}
-        label="Live AI panel"
-        description="Stream TL;DR and bullets while you record."
+        label="Otomatik canlı özet"
+        description="Sen konuşurken her birkaç saniyede bir TL;DR'ı yeniden üretir. Kapalıyken de panel görünür kalır ve istediğin zaman 'Regenerate' butonuyla manuel özet alabilirsin — varsayılanı kapalıdır çünkü çok kısa konuşma parçalarından üretilen taslaklar genelde anlamsız çıkıyor."
       />
       <Toggle
         checked={autoSummarise}
         onChange={setAutoSummarise}
-        label="Auto-summarise on stop"
-        description="Generate a final summary the moment you stop recording."
+        label="Durdurunca özet oluştur"
+        description="Kaydı durdurduğun anda son halinden tek seferlik nihai bir özet üretir."
       />
+
     </Section>
   );
 }

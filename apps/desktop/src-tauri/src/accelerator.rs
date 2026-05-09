@@ -747,9 +747,87 @@ mod ort_ep_probe {
 struct WindowsNpu {
     name: String,
     manufacturer: String,
+    /// PnP setup class — used by the Rust-side validator to drop any row
+    /// that PowerShell let through but obviously isn't a compute device.
+    /// Currently consumed only at scan-construction time (the deny-list
+    /// check happens before this field is stored). We still keep it on
+    /// the struct so future diagnostic output can surface "device X was
+    /// kept under class Y" without re-shelling to PowerShell.
+    #[allow(dead_code)]
+    class: String,
+
     /// Which probe surfaced this entry — useful in the diagnostic report.
     source: String,
 }
+
+/// Setup-class names that categorically can't be compute accelerators.
+/// PowerShell already filters these out in pass 2, but we apply the same
+/// guard in Rust as a belt-and-braces safety net (e.g. for rows from
+/// pass 1 / `ComputeAccelerator` where a vendor mis-classifies a non-NPU
+/// device into the class).
+#[cfg(target_os = "windows")]
+const NON_ACCELERATOR_CLASSES: &[&str] = &[
+    "MEDIA",
+    "AudioEndpoint",
+    "Bluetooth",
+    "Camera",
+    "Image",
+    "HIDClass",
+    "USB",
+    "USBDevice",
+    "Net",
+    "PrintQueue",
+    "Printer",
+    "Modem",
+    "Monitor",
+    "Keyboard",
+    "Mouse",
+    "WPD",
+    "SmartCardReader",
+    "Sensor",
+    "Biometric",
+];
+
+/// Rust-side validator that double-checks a row's name with the same
+/// word-boundary keyword set the PowerShell pass uses. Cheap, stringly-
+/// typed, and means even if a `ComputeAccelerator`-classed device shows
+/// up with a totally generic name (or a future PowerShell regression
+/// strips the `\b` anchors) we still don't promote a "CABLE Input" to
+/// an NPU.
+#[cfg(target_os = "windows")]
+fn looks_like_real_npu(name: &str) -> bool {
+    // Tokenise on anything that isn't `[A-Za-z0-9+]` so e.g.
+    // "AMD Ryzen AI" → ["AMD","Ryzen","AI"], and "iNPUt" stays as
+    // a single token (which we then case-insensitively compare).
+    let tokens: Vec<String> = name
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '+'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_ascii_uppercase())
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    // Exact-token matches — these are the unambiguous NPU markers.
+    let single_token_hits = ["NPU", "HEXAGON", "XDNA", "OPENVINO"];
+    if tokens.iter().any(|t| single_token_hits.contains(&t.as_str())) {
+        return true;
+    }
+    // Bi-gram matches: "AI Boost", "Neural Processor", "Ryzen AI",
+    // "Neural Engine", "Copilot+ NPU".
+    for window in tokens.windows(2) {
+        let bigram = (window[0].as_str(), window[1].as_str());
+        match bigram {
+            ("AI", "BOOST") => return true,
+            ("NEURAL", "PROCESSOR") | ("NEURAL", "PROCESSORS") => return true,
+            ("NEURAL", "ENGINE") => return true,
+            ("RYZEN", "AI") => return true,
+            ("COPILOT+", "NPU") => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, Default, Clone)]
@@ -768,36 +846,65 @@ fn windows_npu_scan() -> WindowsNpuScan {
     // 250-300 ms cold-start cost is amortised. Each probe prefixes its
     // output with a tag (`PNP|`, `NAME|`, `DXG|`) so we can attribute
     // the source.
+    // ---------------------------------------------------------------
+    // The regex matches MUST be anchored with `\b` word boundaries.
+    // Without them the bare `NPU` token matches the substring `nPU`
+    // inside `iNPUt` (PowerShell `-match` is case-insensitive), so
+    // every present-only device with "Input" in its FriendlyName —
+    // most notoriously "CABLE Input (VB-Audio Virtual Cable)" —
+    // would get misclassified as an NPU. Same reasoning for `Neural`
+    // matching `Neural*Net*` driver strings, etc.
+    //
+    // We also exclude PnP classes that physically can't be a compute
+    // accelerator (audio endpoints, bluetooth, USB hubs…). This is a
+    // belt-and-braces guard so a future driver that puts something
+    // suspicious in its FriendlyName still can't get promoted to
+    // "NPU" if the device class says it's a microphone.
     let script = r#"
 $ErrorActionPreference = 'SilentlyContinue'
+
+# Classes that are categorically NOT compute accelerators. We bail
+# out of any PnP candidate that lives under one of these — keeps
+# audio/network/USB devices from being promoted by the fuzzy
+# friendly-name fallback below.
+$excludedClasses = @(
+    'MEDIA', 'AudioEndpoint', 'Bluetooth', 'Camera', 'Image',
+    'HIDClass', 'USB', 'USBDevice', 'Net', 'PrintQueue',
+    'Printer', 'Modem', 'Monitor', 'Keyboard', 'Mouse',
+    'WPD', 'SmartCardReader', 'Sensor', 'Biometric'
+)
 
 # Pass 1 — PnP ComputeAccelerator class. This is the canonical surface
 # Microsoft documents for Copilot+ NPUs.
 $pnp = Get-PnpDevice -PresentOnly -Class ComputeAccelerator
 foreach ($x in $pnp) {
     $mfg = (Get-PnpDeviceProperty -InstanceId $x.InstanceId -KeyName 'DEVPKEY_Device_Manufacturer').Data
-    Write-Output ("PNP|{0}|{1}" -f $x.FriendlyName, $mfg)
+    Write-Output ("PNP|{0}|{1}|{2}" -f $x.FriendlyName, $mfg, $x.Class)
 }
 
 # Pass 2 — friendly-name fallback. Some early Lunar Lake / Hawk Point /
 # Strix Halo drivers list the NPU under the System or "Neural processors"
-# class instead of ComputeAccelerator, so we widen the net.
+# class instead of ComputeAccelerator, so we widen the net — but only
+# across plausible classes and with WORD-BOUNDARY anchored regex so
+# we never accidentally promote "CABLE Input" because it contains
+# the substring "NPU".
 $names = Get-PnpDevice -PresentOnly | Where-Object {
-    $_.FriendlyName -match 'NPU|Neural Processor|AI Boost|Hexagon|XDNA|Ryzen AI'
+    ($excludedClasses -notcontains $_.Class) -and
+    ($_.FriendlyName -match '\bNPU\b|\bNeural\s+Processor(s)?\b|\bAI\s+Boost\b|\bHexagon\b|\bXDNA\b|\bRyzen\s+AI\b|\bCopilot\+\s*NPU\b')
 }
 foreach ($x in $names) {
     $mfg = (Get-PnpDeviceProperty -InstanceId $x.InstanceId -KeyName 'DEVPKEY_Device_Manufacturer').Data
-    Write-Output ("NAME|{0}|{1}" -f $x.FriendlyName, $mfg)
+    Write-Output ("NAME|{0}|{1}|{2}" -f $x.FriendlyName, $mfg, $x.Class)
 }
 
 # Pass 3 — DXGI adapter scan via CIM. Windows 11 24H2 enumerates the NPU
 # as a D3D12 adapter, which means it has a `Win32_VideoController` row.
-# We filter by name to avoid mis-reporting the GPU as an NPU.
+# Same word-boundary tightening as Pass 2.
 $gpu = Get-CimInstance Win32_VideoController | Where-Object {
-    $_.Name -match 'NPU|Neural|AI Boost|Hexagon|XDNA|Ryzen AI'
+    $_.Name -match '\bNPU\b|\bNeural\s+(Processor|Engine)\b|\bAI\s+Boost\b|\bHexagon\b|\bXDNA\b|\bRyzen\s+AI\b'
 }
 foreach ($x in $gpu) {
-    Write-Output ("DXG|{0}|{1}" -f $x.Name, $x.AdapterCompatibility)
+    Write-Output ("DXG|{0}|{1}|VideoController" -f $x.Name, $x.AdapterCompatibility)
 }
 "#;
 
@@ -840,11 +947,41 @@ foreach ($x in $gpu) {
         if line.is_empty() {
             continue;
         }
-        let mut parts = line.splitn(3, '|');
+        // Each line is `SOURCE|FRIENDLY_NAME|MANUFACTURER|CLASS`. The
+        // class field is new (was missing in the pre-fix version) — it
+        // backstops PowerShell's `-notcontains $excludedClasses` check
+        // so a future regression in the script can't bypass us.
+        let mut parts = line.splitn(4, '|');
         let source = parts.next().unwrap_or("").to_string();
         let name = parts.next().unwrap_or("").trim().to_string();
         let manufacturer = parts.next().unwrap_or("").trim().to_string();
+        let class = parts.next().unwrap_or("").trim().to_string();
         if name.is_empty() {
+            continue;
+        }
+        // Belt-and-braces #1: drop anything whose PnP class is on the
+        // "categorically not an accelerator" list. This catches the
+        // CABLE Input → "MEDIA" / "AudioEndpoint" case even if the
+        // PowerShell pass somehow lets it through.
+        if NON_ACCELERATOR_CLASSES
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&class))
+        {
+            tracing::debug!(
+                name = %name,
+                class = %class,
+                "dropping PnP candidate: class is in NON_ACCELERATOR_CLASSES",
+            );
+            continue;
+        }
+        // Belt-and-braces #2: require the friendly name to actually
+        // look like an NPU under the same word-boundary rules the
+        // PowerShell regex uses.
+        if !looks_like_real_npu(&name) {
+            tracing::debug!(
+                name = %name,
+                "dropping PnP candidate: friendly name doesn't match NPU keyword set",
+            );
             continue;
         }
         // De-dupe across the three probes — same device may surface in
@@ -855,6 +992,7 @@ foreach ($x in $gpu) {
         devices.push(WindowsNpu {
             name,
             manufacturer,
+            class,
             source,
         });
     }
@@ -864,6 +1002,7 @@ foreach ($x in $gpu) {
         diagnostic: None,
     }
 }
+
 
 #[cfg(target_os = "windows")]
 fn detect_windows_npu() -> Option<AcceleratorInfo> {
@@ -1139,4 +1278,70 @@ mod tests {
         // The first entry is always the compile-features summary.
         assert_eq!(report.entries[0].id, "compile-features");
     }
+
+    // ───────────────────────────────────────────────────────────────
+    // Windows NPU friendly-name validator regression tests
+    // ───────────────────────────────────────────────────────────────
+    //
+    // The original "NPU|Neural Processor|…" PowerShell regex didn't
+    // anchor with `\b` and matched substrings, so any FriendlyName
+    // containing the letters "nPU" — most notoriously the VB-Audio
+    // virtual sound card "CABLE Input (VB-Audio Virtual Cable)" —
+    // got promoted to an NPU. These tests pin the new behaviour.
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validator_rejects_audio_devices_with_npu_substring() {
+        // The exact string that triggered the original bug.
+        assert!(
+            !looks_like_real_npu("CABLE Input (VB-Audio Virtual Cable)"),
+            "CABLE Input must not be promoted to NPU just because `iNPUt` contains the substring `NPU`",
+        );
+        assert!(!looks_like_real_npu("CABLE Output (VB-Audio Virtual Cable)"));
+        assert!(!looks_like_real_npu("Microphone (Realtek(R) Audio)"));
+        assert!(!looks_like_real_npu("Headphones"));
+        // Devices whose name happens to contain a fragment of an NPU
+        // keyword but not as a standalone token.
+        assert!(!looks_like_real_npu("NeuralNet Trainer Pro 9000"));
+        assert!(!looks_like_real_npu("Neuralink Interface"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validator_accepts_real_npu_friendly_names() {
+        // The actual marketing names Windows surfaces for shipping NPUs.
+        assert!(looks_like_real_npu("Intel(R) AI Boost"));
+        assert!(looks_like_real_npu("Qualcomm(R) Hexagon(TM) NPU"));
+        assert!(looks_like_real_npu("AMD Ryzen AI"));
+        assert!(looks_like_real_npu("AMD XDNA Neural Processing Unit"));
+        assert!(looks_like_real_npu("NPU"));
+        assert!(looks_like_real_npu("Neural Processor"));
+        assert!(looks_like_real_npu("Neural Processors"));
+        assert!(looks_like_real_npu("Apple Neural Engine"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn validator_handles_empty_and_punctuation_only_names() {
+        assert!(!looks_like_real_npu(""));
+        assert!(!looks_like_real_npu("   "));
+        assert!(!looks_like_real_npu("--"));
+        assert!(!looks_like_real_npu("()"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn excluded_classes_list_covers_audio_endpoints() {
+        // The two classes that the CABLE Input device is most likely to
+        // surface under (depending on how VB-Audio installed the
+        // driver) — both must be on the deny-list.
+        assert!(NON_ACCELERATOR_CLASSES
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case("MEDIA")));
+        assert!(NON_ACCELERATOR_CLASSES
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case("AudioEndpoint")));
+    }
 }
+
+

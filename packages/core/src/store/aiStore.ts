@@ -22,9 +22,19 @@ const DEFAULTS: AiPreferences = {
   provider: "mock",
   apiKey: "",
   summaryLength: "medium",
+  // Auto-summarise on stop is fine — it runs once and produces a single
+  // tidy summary the user can read after the recording. Live streaming
+  // and stop-time summary are independently toggleable below.
   autoSummarise: true,
-  liveAi: true,
+  // Live AI panel: was on by default, but the heuristic summariser is
+  // re-run on every debounce while recording, which both spams the
+  // panel with low-quality drafts and burns CPU during inference.
+  // Default is now off — the user opts in from Settings → AI, and the
+  // <LiveAiPanel> "Regenerate" button still works on demand without
+  // this toggle (it calls `ai.run()` directly).
+  liveAi: false,
 };
+
 
 const STORAGE_KEY = "voxnap.ai.v1";
 

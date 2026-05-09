@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import {
   DEFAULT_MODEL,
+  useAiStore,
   useOnboardingStore,
   useTranscriptionStore,
   type ComputeBackend,
@@ -33,6 +34,7 @@ import {
   type SpeakerColor,
   type WhisperModelId,
 } from "@voxnap/core";
+
 
 
 import { MicButton } from "../components/MicButton.js";
@@ -229,13 +231,23 @@ export function LiveTranscribePage({
     startedAtRef.current = null;
   }, [t.engineState]);
 
-  // Live AI stream
+  // Live AI stream.
+  //
+  // We deliberately decouple the *auto* re-run loop from the rest of the
+  // panel: the `Regenerate` button on `<LiveAiPanel>` calls `ai.run()`
+  // directly, which works regardless of these flags. The store-driven
+  // `liveAi` toggle (Settings → AI) only gates the *automatic*
+  // debounced regeneration that fires on every new final segment —
+  // that's the part that produced the noisy, low-signal drafts the
+  // user complained about.
+  const liveAiAuto = useAiStore((s) => s.liveAi);
   const ai = useLiveAi(summarizer, t.finals, {
     enabled: true,
-    auto: t.engineState === "running",
+    auto: liveAiAuto && t.engineState === "running",
     debounceMs: 1200,
     minFinals: 2,
   });
+
 
   const onCopy = async () => {
     if (!t.fullText) return;

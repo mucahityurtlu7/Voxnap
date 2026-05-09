@@ -273,6 +273,24 @@ pub fn spawn(
         let sr = TARGET_SAMPLE_RATE as usize;
         let frame_samples = (sr * 30) / 1000; // 30 ms = 480 samples
 
+        // When the user picked `language = "auto"`, the very first
+        // utterance lets whisper auto-detect, but afterwards we *lock*
+        // the detected language for the rest of the session. This
+        // gives:
+        //   1. Stable language reporting in the UI badge (no
+        //      flip-flopping between TR / EN every utterance because
+        //      a 1-second partial happened to start with English-like
+        //      phonemes).
+        //   2. Dramatically better foreign-word handling, because we
+        //      can now also feed the matching multilingual
+        //      `initial_prompt` (see `pinned_lang_prompt`) once we
+        //      know which language to bias toward.
+        //   3. Correct `Session.language` persistence — without this
+        //      the whole session would be saved with `language: "auto"`
+        //      and downstream filtering / analytics would be useless.
+        let mut detected_lang: Option<String> = None;
+
+
         // VAD knobs
         let vad_enabled = cfg.vad_enabled;
         let vad_threshold = cfg.vad_threshold.unwrap_or(0.012);
@@ -321,6 +339,7 @@ pub fn spawn(
                                 &utterance,
                                 start_ms,
                                 sr,
+                                &mut detected_lang,
                             );
                         }
                         break;
@@ -350,6 +369,7 @@ pub fn spawn(
                             &mut next_partial_at,
                             partial_interval,
                             &mut last_partial_text,
+                            &mut detected_lang,
                         );
                         continue;
                     }
@@ -409,6 +429,7 @@ pub fn spawn(
                                     &utterance,
                                     start_ms,
                                     sr,
+                                    &mut detected_lang,
                                 );
 
                                 // Reset state for the next utterance.
@@ -464,6 +485,7 @@ pub fn spawn(
                         &mut next_partial_at,
                         partial_interval,
                         &mut last_partial_text,
+                        &mut detected_lang,
                     );
                 }
             }
@@ -484,6 +506,80 @@ struct RawSegment {
     text: String,
     confidence: Option<f32>,
 }
+
+/// Result of one whisper inference pass. Carries both the decoded text
+/// segments and — when relevant — the language whisper *actually* used
+/// for this pass. The latter is what we want to report back to the UI:
+/// when the user picks "auto" we need to surface the detected code
+/// (`tr`, `en`, …) instead of the literal string "auto", otherwise the
+/// session badge / persisted Session.language would be useless for
+/// later filtering.
+#[derive(Debug, Clone, Default)]
+struct TranscribeResult {
+    segments: Vec<RawSegment>,
+    /// ISO-639-1 (e.g. `"tr"`) when known, `None` for the very first
+    /// auto-detect pass that produced no detection.
+    language: Option<String>,
+}
+
+/// Multilingual hint fed into whisper as `initial_prompt` when the user
+/// has *pinned* a non-English language. Whisper handles loan-words /
+/// English jargon dramatically better when primed with a sentence in
+/// the pinned language that establishes "this transcript may contain
+/// foreign words". Without this, picking `language = "tr"` forces
+/// whisper to mangle every English word in the audio (e.g. it will
+/// emit "vis kod" instead of "VS Code") because the model has zero
+/// context that code-switching is allowed.
+///
+/// Returns `None` for English (no need to bias — English already
+/// transcribes loanwords as-is) and for `"auto"` (we don't know what
+/// language whisper is about to pick yet, so we leave the prompt
+/// alone). Languages we don't have a hand-tuned prompt for fall
+/// through to `None` rather than guessing a generic English prompt
+/// that would hurt detection more than it helps.
+fn pinned_lang_prompt(lang: &str) -> Option<&'static str> {
+    match lang {
+        "tr" => Some(
+            "Aşağıdaki ses kaydı Türkçe konuşmadır ve içinde İngilizce \
+             teknik terimler, kişi ve marka isimleri geçebilir:",
+        ),
+        "de" => Some(
+            "Es folgt ein deutsches Gespräch, das auch englische \
+             Fachbegriffe und Namen enthalten kann:",
+        ),
+        "es" => Some(
+            "A continuación una conversación en español que puede \
+             incluir términos técnicos y nombres en inglés:",
+        ),
+        "fr" => Some(
+            "Voici une conversation en français pouvant contenir des \
+             termes techniques et des noms en anglais :",
+        ),
+        "it" => Some(
+            "Segue una conversazione in italiano che può contenere \
+             termini tecnici e nomi in inglese:",
+        ),
+        "pt" => Some(
+            "Segue-se uma conversa em português que pode conter \
+             termos técnicos e nomes em inglês:",
+        ),
+        "ru" => Some(
+            "Далее разговор на русском языке, в котором могут \
+             встречаться английские технические термины и имена:",
+        ),
+        "nl" => Some(
+            "Hierna volgt een Nederlands gesprek dat Engelse \
+             vaktermen en namen kan bevatten:",
+        ),
+        "pl" => Some(
+            "Poniżej rozmowa po polsku, która może zawierać \
+             angielskie terminy techniczne i nazwy:",
+        ),
+        // English only / auto / unknown → no prompt.
+        _ => None,
+    }
+}
+
 
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
@@ -509,13 +605,37 @@ pub(crate) fn level_of(samples: &[f32]) -> (f32, f32) {
     (rms.min(1.0), peak.min(1.0))
 }
 
-fn lang_or_none(cfg: &WhisperConfig) -> Option<String> {
+/// Resolve the *effective* language to feed into whisper this pass.
+/// Once `detected_lang` is `Some(...)` (i.e. the very first auto-detect
+/// pass succeeded) we lock it in for the remainder of the session so
+/// the badge in the UI / `Session.language` are stable and so we can
+/// inject the matching multilingual prompt.
+fn effective_lang<'a>(
+    cfg: &'a WhisperConfig,
+    detected: Option<&'a String>,
+) -> Option<&'a str> {
+    if cfg.language == "auto" || cfg.language.is_empty() {
+        detected.map(|s| s.as_str())
+    } else {
+        Some(cfg.language.as_str())
+    }
+}
+
+/// What we report to the UI on each `voxnap://segment`. Prefer the
+/// session-locked detection (`detected`) over the literal config value
+/// — when the user picked `"auto"` we want `tr` / `en` / … to land on
+/// the segment, not the string `"auto"`.
+fn report_lang(cfg: &WhisperConfig, detected: Option<&String>) -> Option<String> {
+    if let Some(d) = detected {
+        return Some(d.clone());
+    }
     if cfg.language == "auto" || cfg.language.is_empty() {
         None
     } else {
         Some(cfg.language.clone())
     }
 }
+
 
 fn combine_text(segments: &[RawSegment]) -> String {
     let mut out = String::new();
@@ -542,6 +662,13 @@ fn avg_confidence(segments: &[RawSegment]) -> Option<f32> {
 }
 
 /// Run whisper on the in-progress utterance and emit it as a final segment.
+///
+/// `detected_lang` is the session-wide language lock. On the first
+/// auto-detect pass we read the language whisper picked from the
+/// returned `TranscribeResult` and stash it here so every subsequent
+/// pass (partial or final) is pinned to that language — fixes the
+/// "I spoke Turkish but the very first 1-second clip got classified
+/// as English and the whole session is now broken" failure mode.
 fn finalise_utterance(
     app: &AppHandle,
     ctx: Option<&mut WhisperCtx>,
@@ -549,14 +676,23 @@ fn finalise_utterance(
     utterance: &[f32],
     start_ms: i64,
     sr: usize,
+    detected_lang: &mut Option<String>,
 ) {
     let len_ms = (utterance.len() as i64 * 1000) / sr as i64;
     let end_ms = start_ms + len_ms;
     let Some(c) = ctx else { return };
 
-    match c.transcribe(utterance, cfg) {
-        Ok(segments) => {
-            let text = combine_text(&segments);
+    let lang_for_pass = effective_lang(cfg, detected_lang.as_ref()).map(|s| s.to_string());
+    match c.transcribe(utterance, cfg, lang_for_pass.as_deref()) {
+        Ok(result) => {
+            // Lock in whatever whisper auto-detected on the first pass.
+            if detected_lang.is_none() {
+                if let Some(l) = result.language.as_ref() {
+                    *detected_lang = Some(l.clone());
+                }
+            }
+
+            let text = combine_text(&result.segments);
             if text.is_empty() {
                 return;
             }
@@ -568,8 +704,8 @@ fn finalise_utterance(
                     start_ms,
                     end_ms,
                     is_final: true,
-                    confidence: avg_confidence(&segments),
-                    language: lang_or_none(cfg),
+                    confidence: avg_confidence(&result.segments),
+                    language: report_lang(cfg, detected_lang.as_ref()),
                 },
             );
         }
@@ -600,6 +736,7 @@ fn emit_partial_if_due(
     next_partial_at: &mut tokio::time::Instant,
     partial_interval: Duration,
     last_partial_text: &mut String,
+    detected_lang: &mut Option<String>,
 ) {
     let Some(start_ms) = utterance_start_ms else { return };
     if utterance.len() < min_speech_samples {
@@ -611,8 +748,19 @@ fn emit_partial_if_due(
     *next_partial_at = tokio::time::Instant::now() + partial_interval;
 
     let Some(c) = ctx else { return };
-    let Ok(segments) = c.transcribe(utterance, cfg) else { return };
-    let text = combine_text(&segments);
+    let lang_for_pass = effective_lang(cfg, detected_lang.as_ref()).map(|s| s.to_string());
+    let Ok(result) = c.transcribe(utterance, cfg, lang_for_pass.as_deref()) else { return };
+
+    // Same auto-detect lock-in as in finalise_utterance — the very
+    // first emission (partial or final) "wins" the language for the
+    // session.
+    if detected_lang.is_none() {
+        if let Some(l) = result.language.as_ref() {
+            *detected_lang = Some(l.clone());
+        }
+    }
+
+    let text = combine_text(&result.segments);
     if text.is_empty() {
         return;
     }
@@ -633,7 +781,7 @@ fn emit_partial_if_due(
             end_ms: start_ms + len_ms,
             is_final: false,
             confidence: None,
-            language: lang_or_none(cfg),
+            language: report_lang(cfg, detected_lang.as_ref()),
         },
     );
 }
@@ -667,7 +815,24 @@ impl WhisperCtx {
         Ok(Self { inner })
     }
 
-    fn transcribe(&mut self, samples: &[f32], cfg: &WhisperConfig) -> Result<Vec<RawSegment>> {
+    /// Run one whisper pass.
+    ///
+    /// `effective_language` is the resolved ISO-639-1 code for *this*
+    /// pass — the caller has already merged `cfg.language` ("auto" /
+    /// pinned) with the session-wide detected language, so this layer
+    /// just has to do what it's told:
+    ///   • `Some("tr")`  → pin the decoder to Turkish *and* feed the
+    ///     matching multilingual `initial_prompt` so foreign words are
+    ///     handled gracefully (the whole reason this knob exists).
+    ///   • `None`        → ask whisper to auto-detect; we then read
+    ///     `state.full_lang_id_from_state()` back out so the caller can
+    ///     lock that detection in for the rest of the session.
+    fn transcribe(
+        &mut self,
+        samples: &[f32],
+        cfg: &WhisperConfig,
+        effective_language: Option<&str>,
+    ) -> Result<TranscribeResult> {
         // BeamSearch with a small beam gives noticeably better quality than
         // Greedy (which the previous implementation used) without making
         // each utterance unbearably slow on CPU. Whisper.cpp authors
@@ -701,15 +866,41 @@ impl WhisperCtx {
         params.set_suppress_blank(true);
         params.set_suppress_nst(true);
 
+        // Temperature fallback. Starting at 0.0 keeps the output
+        // deterministic on clean speech, but the increment lets
+        // whisper escape the "I'm absolutely sure this is English"
+        // local optimum when it sees a Turkish utterance with English
+        // loanwords sprinkled in. Without this whisper occasionally
+        // collapses the entire utterance to a single hallucinated
+        // English sentence.
+        params.set_temperature(0.0);
+        params.set_temperature_inc(0.2);
+
         // Set language explicitly. `None` = let whisper auto-detect.
         // If we pass `Some("auto")` whisper.cpp interprets it as the
         // literal string "auto" and produces broken output.
-        let lang = if cfg.language == "auto" || cfg.language.is_empty() {
-            None
-        } else {
-            Some(cfg.language.as_str())
-        };
-        params.set_language(lang);
+        params.set_language(effective_language);
+        // Belt-and-braces: when no language is pinned tell whisper
+        // explicitly to run its detector. Some whisper.cpp builds
+        // require this in addition to `language = NULL` to produce a
+        // valid lang id we can read back from state.
+        if effective_language.is_none() {
+            params.set_detect_language(true);
+        }
+
+        // When we *do* know the language, prime the decoder with a
+        // matching multilingual hint sentence. This is what fixes the
+        // "TR pinned mode mangles every English word" complaint —
+        // whisper now has explicit context that the speaker may
+        // code-switch into English/foreign jargon, so brand names and
+        // technical terms come out intact (e.g. "VS Code" instead of
+        // "vis kod"). See `pinned_lang_prompt` for the per-language
+        // text and the rationale.
+        if let Some(lang) = effective_language {
+            if let Some(prompt) = pinned_lang_prompt(lang) {
+                params.set_initial_prompt(prompt);
+            }
+        }
 
         if let Some(n) = cfg.threads {
             params.set_n_threads(n);
@@ -722,6 +913,20 @@ impl WhisperCtx {
         state
             .full(params, samples)
             .map_err(|e| Error::Whisper(e.to_string()))?;
+
+        // Read back whichever language the decoder ended up using.
+        // For pinned passes this is just the same code we passed in —
+        // for auto-detect passes this is the actual detection result
+        // (e.g. `tr`). The caller compares against its own session
+        // lock so it only commits to the *first* successful detection.
+        // `get_lang_str` is re-exported at the crate root via
+        // `pub use standalone::*` (the `standalone` module itself is
+        // private). It maps the i32 lang id back to an ISO-639-1 code
+        // — the same string set we accept on the way in via
+        // `set_language`, which keeps the round-trip clean.
+        let detected_id = state.full_lang_id_from_state();
+        let language = whisper_rs::get_lang_str(detected_id)
+            .map(|s| s.to_string());
 
         let n = state.full_n_segments();
         let mut out = Vec::with_capacity(n as usize);
@@ -768,6 +973,9 @@ impl WhisperCtx {
 
             out.push(RawSegment { text, confidence });
         }
-        Ok(out)
+        Ok(TranscribeResult {
+            segments: out,
+            language,
+        })
     }
 }
